@@ -145,6 +145,7 @@ pub const Token = struct {
         DocComment,
         ContainerDocComment,
         ShebangLine,
+        CustomOperator,
         Keyword_align,
         Keyword_allowzero,
         Keyword_and,
@@ -270,6 +271,7 @@ pub const Token = struct {
                 .AngleBracketAngleBracketRight => ">>",
                 .AngleBracketAngleBracketRightEqual => ">>=",
                 .Tilde => "~",
+                .CustomOperator => "<_>",
                 .Keyword_align => "align",
                 .Keyword_allowzero => "allowzero",
                 .Keyword_and => "and",
@@ -407,6 +409,8 @@ pub const Tokenizer = struct {
         period_2,
         period_asterisk,
         saw_at_sign,
+        maybe_custom_operator,
+        maybe_custom_operator_unicode_internal,
     };
 
     fn isIdentifierChar(char: u8) bool {
@@ -932,9 +936,29 @@ pub const Tokenizer = struct {
                         self.index += 1;
                         break;
                     },
-                    else => {
+                    ' ', '\n' => {
                         result.id = .AngleBracketLeft;
                         break;
+                    },
+                    0xc0...0xdf => { // 110xxxxx
+                        state = .maybe_custom_operator_unicode_internal;
+                        remaining_code_units = 1;
+                    },
+                    0xe0...0xef => { // 1110xxxx
+                        state = .maybe_custom_operator_unicode_internal;
+                        remaining_code_units = 2;
+                    },
+                    0xf0...0xf7 => { // 11110xxx
+                        state = .maybe_custom_operator_unicode_internal;
+                        remaining_code_units = 3;
+                    },
+                    else => {
+                        if (self.index == self.buffer.len - 1) {
+                            result.id = .AngleBracketLeft;
+                            break;
+                        } else {
+                            state = .maybe_custom_operator;
+                        }
                     },
                 },
 
@@ -1308,6 +1332,37 @@ pub const Tokenizer = struct {
                         break;
                     },
                 },
+                .maybe_custom_operator => switch (c) {
+                    '>' => {
+                        self.index += 1;
+                        result.id = .CustomOperator;
+                        break;
+                    },
+                    else => {
+                        // reinterpet as normal less-than
+                        result.id = .AngleBracketLeft;
+                        self.index -= 1;
+                        break;
+                    }
+                },
+                .maybe_custom_operator_unicode_internal => switch (c) {
+                    '>' => {
+                        self.index += 1;
+                        result.id = .CustomOperator;
+                        break;
+                    },
+                    0x80...0xbf => {
+                        if (remaining_code_units == 0) {
+                            result.id = .Invalid;
+                            break;
+                        }
+                        remaining_code_units -= 1;
+                    },
+                    else => {
+                        result.id = .Invalid;
+                        break;
+                    }
+                }
             }
         } else if (self.index == self.buffer.len) {
             switch (state) {
@@ -1360,6 +1415,8 @@ pub const Tokenizer = struct {
                 .char_literal_end,
                 .char_literal_unicode,
                 .string_literal_backslash,
+                .maybe_custom_operator,
+                .maybe_custom_operator_unicode_internal,
                 => {
                     result.id = .Invalid;
                 },
@@ -1955,6 +2012,14 @@ test "tokenizer - number literals octal" {
     testTokenize("0o_,", &[_]Token.Id{ .Invalid, .Identifier, .Comma });
 }
 
+test "tokenizer - custom operators" {
+    testTokenize("<+>", &[_]Token.Id{ .CustomOperator });
+    testTokenize("<a", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
+    testTokenize("<abc", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
+    // and also with special unicode characters
+    testTokenize("<⊕>", &[_]Token.Id{ .CustomOperator });
+}
+
 test "tokenizer - number literals hexadeciaml" {
     testTokenize("0x0", &[_]Token.Id{.IntegerLiteral});
     testTokenize("0x1", &[_]Token.Id{.IntegerLiteral});
@@ -2038,7 +2103,7 @@ test "tokenizer - number literals hexadeciaml" {
     testTokenize("0x0.0p_0", &[_]Token.Id{ .Invalid, .Identifier });
     testTokenize("0x0.0p+_0", &[_]Token.Id{ .Invalid, .Identifier });
     testTokenize("0x0.0p-_0", &[_]Token.Id{ .Invalid, .Identifier });
-    testTokenize("0x0.0p0_", &[_]Token.Id{ .Invalid, .Eof });
+    testTokenize("0x0.0p0_", &[_]Token.Id{ .Invalid, .Eof});
 }
 
 fn testTokenize(source: []const u8, expected_tokens: []const Token.Id) void {
