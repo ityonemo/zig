@@ -2228,6 +2228,17 @@ test "zig fmt: infix operators" {
     );
 }
 
+test "zig fmt: custom operators" {
+    std.debug.print("==============\n", .{});
+    try testCanonical(
+        \\test "custom infix operators" {
+        \\    _ = (a <+> b);
+        \\    _ = (c <⊕> d);
+        \\}
+        \\
+    );
+}
+
 test "zig fmt: precedence" {
     try testCanonical(
         \\test "precedence" {
