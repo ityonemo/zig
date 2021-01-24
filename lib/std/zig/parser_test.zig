@@ -2228,12 +2228,16 @@ test "zig fmt: infix operators" {
     );
 }
 
-test "zig fmt: custom operators" {
-    std.debug.print("==============\n", .{});
+test "zig fmt: custom infix binary functions" {
     try testCanonical(
-        \\test "custom infix operators" {
+        \\test "custom infix binary functions" {
         \\    _ = (a <+> b);
         \\    _ = (c <⊕> d);
+        \\    //_ = (a <+₁> b);
+        \\    //_ = (a <+'> b);
+        \\    //_ = (c <⊕₁> d);
+        \\    //_ = (c <⊕'> d);
+        \\    _ = (a + b <+> c);
         \\}
         \\
     );
