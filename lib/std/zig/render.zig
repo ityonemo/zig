@@ -1042,6 +1042,16 @@ fn renderExpression(
 
         .Call => {
             const call = @fieldParentPtr(ast.Node.Call, "base", base);
+
+            // special casing for infix function calls.
+            if (isCallInfixFunction(tree, call.lhs)) {
+                const params = call.params();
+                const lparen = tree.prevToken(params[0].firstToken());
+                try renderToken(tree, ais, lparen, Space.None);
+                try renderInfixFunction(allocator, ais, tree, call, Space.None);
+                return renderToken(tree, ais, call.rtoken, space);
+            }
+
             if (call.async_token) |async_token| {
                 try renderToken(tree, ais, async_token, Space.Space);
             }
@@ -2152,6 +2162,22 @@ fn renderExpression(
     }
 }
 
+fn renderInfixFunction(
+    allocator: *mem.Allocator,
+    ais: anytype,
+    tree: *ast.Tree,
+    call: *ast.Node.Call,
+    space: Space,
+) (@TypeOf(ais.*).Error || Error)!void {
+    const params = call.params();
+    // this must have two parameters
+    std.debug.assert(params.len == 2);
+
+    try renderExpression(allocator, ais, tree, params[0], Space.Space);
+    try renderExpression(allocator, ais, tree, call.lhs, Space.Space);
+    return renderExpression(allocator, ais, tree, params[1], Space.None);
+}
+
 fn renderArrayType(
     allocator: *mem.Allocator,
     ais: anytype,
@@ -2671,4 +2697,86 @@ fn rowSize(tree: *ast.Tree, exprs: []*ast.Node, rtoken: ast.TokenIndex) ?usize {
         }
     }
     unreachable;
+}
+
+// code for validating special binary infix functions.
+
+const InfixTokens = enum {
+    LeftAngle, RightAngle, Unicode, OneMoreCodeUnit, TwoMoreCodeUnits, ThreeMoreCodeUnits
+};
+
+fn isCallInfixFunction(tree: *ast.Tree, base: *ast.Node) bool {
+    if (base.tag == .Identifier) {
+        const casted_node = base.cast(ast.Node.OneToken).?;
+        const token_loc = tree.token_locs[casted_node.token];
+        var token = tree.tokenSliceLoc(token_loc)[0..];
+        if (!validateInfix(&token, .LeftAngle)) return false;
+        if (!validateInfix(&token, .Unicode)) return false;
+        // one character case
+        if (validateInfix(&token, .RightAngle)) return true;
+        // two character case
+        if (!validateInfix(&token, .Unicode)) {
+            return validateInfix(&token, .RightAngle);
+        }
+    }
+    return false;
+}
+
+fn validateInfix(token: *[]const u8, comptime validates: InfixTokens) bool {
+    if (token.len == 0) {
+        return false;
+    }
+
+    var result: bool = undefined;
+
+    result = switch (validates) {
+        .LeftAngle => token.*[0] == '<',
+        .RightAngle => (token.len == 1) and (token.*[0] == '>'),
+        .Unicode => switch (token.*[0]) {
+            // ASCII.  Not going to check validity of actual character here.
+            0x00...0x7f => true,
+            // 110xxxxx
+            0xc0...0xdf => {
+                token.* = token.*[1..];
+                // prevent advancing the token at the end (we just advanced it)
+                return validateInfix(token, .OneMoreCodeUnit);
+            },
+            // 1110xxxx
+            0xe0...0xef => {
+                token.* = token.*[1..];
+                // prevent advancing the token at the end (we just advanced it)
+                return validateInfix(token, .TwoMoreCodeUnits);
+            },
+            // 11110xxx
+            0xf0...0xf7 => {
+                token.* = token.*[1..];
+                // prevent advancing the token at the end (we just advanced it)
+                return validateInfix(token, .ThreeMoreCodeUnits);
+            },
+            else => unreachable,
+        },
+        // return early so that it doesn't advance the token twice.
+        .OneMoreCodeUnit => token.*[0] >= 0x80 and token.*[0] < 0xC0,
+        .TwoMoreCodeUnits => {
+            if (token.*[0] < 0x80 or token.*[0] >= 0xC0) {
+                return false;
+            }
+            token.* = token.*[1..];
+            return validateInfix(token, .OneMoreCodeUnit);
+        },
+        .ThreeMoreCodeUnits => {
+            if (token.*[0] < 0x80 or token.*[0] >= 0xC0) {
+                return false;
+            }
+            token.* = token.*[1..];
+            return validateInfix(token, .TwoMoreCodeUnits);
+        },
+    };
+
+    // advance the token only on success
+    if (result) {
+        token.* = token.*[1..];
+    }
+
+    return result;
 }

@@ -145,7 +145,7 @@ pub const Token = struct {
         DocComment,
         ContainerDocComment,
         ShebangLine,
-        CustomOperator,
+        InfixFn,
         Keyword_align,
         Keyword_allowzero,
         Keyword_and,
@@ -271,7 +271,7 @@ pub const Token = struct {
                 .AngleBracketAngleBracketRight => ">>",
                 .AngleBracketAngleBracketRightEqual => ">>=",
                 .Tilde => "~",
-                .CustomOperator => "<_>",
+                .InfixFn => "<_>",
                 .Keyword_align => "align",
                 .Keyword_allowzero => "allowzero",
                 .Keyword_and => "and",
@@ -409,8 +409,8 @@ pub const Tokenizer = struct {
         period_2,
         period_asterisk,
         saw_at_sign,
-        maybe_custom_operator,
-        maybe_custom_operator_unicode_internal,
+        maybe_infix,
+        maybe_infix_unicode_internal,
     };
 
     fn isIdentifierChar(char: u8) bool {
@@ -941,15 +941,15 @@ pub const Tokenizer = struct {
                         break;
                     },
                     0xc0...0xdf => { // 110xxxxx
-                        state = .maybe_custom_operator_unicode_internal;
+                        state = .maybe_infix_unicode_internal;
                         remaining_code_units = 1;
                     },
                     0xe0...0xef => { // 1110xxxx
-                        state = .maybe_custom_operator_unicode_internal;
+                        state = .maybe_infix_unicode_internal;
                         remaining_code_units = 2;
                     },
                     0xf0...0xf7 => { // 11110xxx
-                        state = .maybe_custom_operator_unicode_internal;
+                        state = .maybe_infix_unicode_internal;
                         remaining_code_units = 3;
                     },
                     else => {
@@ -957,7 +957,7 @@ pub const Tokenizer = struct {
                             result.id = .AngleBracketLeft;
                             break;
                         } else {
-                            state = .maybe_custom_operator;
+                            state = .maybe_infix;
                         }
                     },
                 },
@@ -1332,10 +1332,10 @@ pub const Tokenizer = struct {
                         break;
                     },
                 },
-                .maybe_custom_operator => switch (c) {
+                .maybe_infix => switch (c) {
                     '>' => {
                         self.index += 1;
-                        result.id = .CustomOperator;
+                        result.id = .InfixFn;
                         break;
                     },
                     else => {
@@ -1345,10 +1345,10 @@ pub const Tokenizer = struct {
                         break;
                     }
                 },
-                .maybe_custom_operator_unicode_internal => switch (c) {
+                .maybe_infix_unicode_internal => switch (c) {
                     '>' => {
                         self.index += 1;
-                        result.id = .CustomOperator;
+                        result.id = .InfixFn;
                         break;
                     },
                     0x80...0xbf => {
@@ -1415,8 +1415,8 @@ pub const Tokenizer = struct {
                 .char_literal_end,
                 .char_literal_unicode,
                 .string_literal_backslash,
-                .maybe_custom_operator,
-                .maybe_custom_operator_unicode_internal,
+                .maybe_infix,
+                .maybe_infix_unicode_internal,
                 => {
                     result.id = .Invalid;
                 },
@@ -2012,12 +2012,12 @@ test "tokenizer - number literals octal" {
     testTokenize("0o_,", &[_]Token.Id{ .Invalid, .Identifier, .Comma });
 }
 
-test "tokenizer - custom operators" {
-    testTokenize("<+>", &[_]Token.Id{ .CustomOperator });
+test "tokenizer - infix function" {
+    testTokenize("<+>", &[_]Token.Id{ .InfixFn });
     testTokenize("<a", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
     testTokenize("<abc", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
     // and also with special unicode characters
-    testTokenize("<⊕>", &[_]Token.Id{ .CustomOperator });
+    testTokenize("<⊕>", &[_]Token.Id{ .InfixFn });
 }
 
 test "tokenizer - number literals hexadeciaml" {

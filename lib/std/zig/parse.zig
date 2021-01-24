@@ -1644,15 +1644,15 @@ const Parser = struct {
     }
 
     /// GroupedExpr <- LPAREN Expr RPAREN
-    ///              / LPAREN Expr CustomOperator Expr RPAREN
+    ///              / LPAREN Expr InfixFn Expr RPAREN
     fn parseGroupedExpr(p: *Parser) !?*Node {
         const lparen = p.eatToken(.LParen) orelse return null;
         const expr = try p.expectNode(parseExpr, .{
             .ExpectedExpr = .{ .token = p.tok_i },
         });
 
-        if (p.parseCustomOp() catch null) | op | {
-            return parseCustomOpExpr(p, expr, op);
+        if (p.parseInfixFn() catch null) | op | {
+            return parseInfixFnExpr(p, expr, op);
         }
 
         const rparen = try p.expectToken(.RParen);
@@ -1666,7 +1666,7 @@ const Parser = struct {
         return &node.base;
     }
 
-    fn parseCustomOpExpr(p: *Parser, l_expr: *Node, operation: *Node) !?*Node {
+    fn parseInfixFnExpr(p: *Parser, l_expr: *Node, operation: *Node) !?*Node {
         const node = try Node.Call.alloc(&p.arena.allocator, 2);
 
         const r_expr = if (try p.parseExpr()) | e | e else return error.ParseError;
@@ -3125,8 +3125,8 @@ const Parser = struct {
         return &node.base;
     }
 
-    fn parseCustomOp(p: *Parser) !?*Node {
-        const token = p.eatToken(.CustomOperator) orelse return null;
+    fn parseInfixFn(p: *Parser) !?*Node {
+        const token = p.eatToken(.InfixFn) orelse return null;
         const node = try p.arena.allocator.create(Node.OneToken);
         node.* = .{
             .base = .{ .tag = .Identifier},
