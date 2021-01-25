@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -13,6 +13,7 @@ const math = std.math;
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
+const child_process = @import("child_process.zig");
 
 pub const abort = os.abort;
 pub const exit = os.exit;
@@ -285,27 +286,35 @@ pub const ArgIteratorWasi = struct {
 
 pub const ArgIteratorWindows = struct {
     index: usize,
-    cmd_line: [*]const u8,
+    cmd_line: [*]const u16,
 
-    pub const NextError = error{OutOfMemory};
+    pub const NextError = error{ OutOfMemory, InvalidCmdLine };
 
     pub fn init() ArgIteratorWindows {
-        return initWithCmdLine(os.windows.kernel32.GetCommandLineA());
+        return initWithCmdLine(os.windows.kernel32.GetCommandLineW());
     }
 
-    pub fn initWithCmdLine(cmd_line: [*]const u8) ArgIteratorWindows {
+    pub fn initWithCmdLine(cmd_line: [*]const u16) ArgIteratorWindows {
         return ArgIteratorWindows{
             .index = 0,
             .cmd_line = cmd_line,
         };
     }
 
+    fn getPointAtIndex(self: *ArgIteratorWindows) u16 {
+        // According to
+        // https://docs.microsoft.com/en-us/windows/win32/intl/using-byte-order-marks
+        // Microsoft uses UTF16-LE. So we just read assuming it's little
+        // endian.
+        return std.mem.littleToNative(u16, self.cmd_line[self.index]);
+    }
+
     /// You must free the returned memory when done.
     pub fn next(self: *ArgIteratorWindows, allocator: *Allocator) ?(NextError![:0]u8) {
         // march forward over whitespace
         while (true) : (self.index += 1) {
-            const byte = self.cmd_line[self.index];
-            switch (byte) {
+            const character = self.getPointAtIndex();
+            switch (character) {
                 0 => return null,
                 ' ', '\t' => continue,
                 else => break,
@@ -318,8 +327,8 @@ pub const ArgIteratorWindows = struct {
     pub fn skip(self: *ArgIteratorWindows) bool {
         // march forward over whitespace
         while (true) : (self.index += 1) {
-            const byte = self.cmd_line[self.index];
-            switch (byte) {
+            const character = self.getPointAtIndex();
+            switch (character) {
                 0 => return false,
                 ' ', '\t' => continue,
                 else => break,
@@ -329,8 +338,8 @@ pub const ArgIteratorWindows = struct {
         var backslash_count: usize = 0;
         var in_quote = false;
         while (true) : (self.index += 1) {
-            const byte = self.cmd_line[self.index];
-            switch (byte) {
+            const character = self.getPointAtIndex();
+            switch (character) {
                 0 => return true,
                 '"' => {
                     const quote_is_real = backslash_count % 2 == 0;
@@ -356,15 +365,17 @@ pub const ArgIteratorWindows = struct {
     }
 
     fn internalNext(self: *ArgIteratorWindows, allocator: *Allocator) NextError![:0]u8 {
-        var buf = try std.ArrayListSentineled(u8, 0).init(allocator, "");
+        var buf = std.ArrayList(u16).init(allocator);
         defer buf.deinit();
 
         var backslash_count: usize = 0;
         var in_quote = false;
         while (true) : (self.index += 1) {
-            const byte = self.cmd_line[self.index];
-            switch (byte) {
-                0 => return buf.toOwnedSlice(),
+            const character = self.getPointAtIndex();
+            switch (character) {
+                0 => {
+                    return convertFromWindowsCmdLineToUTF8(allocator, buf.items);
+                },
                 '"' => {
                     const quote_is_real = backslash_count % 2 == 0;
                     try self.emitBackslashes(&buf, backslash_count / 2);
@@ -373,7 +384,7 @@ pub const ArgIteratorWindows = struct {
                     if (quote_is_real) {
                         in_quote = !in_quote;
                     } else {
-                        try buf.append('"');
+                        try buf.append(std.mem.nativeToLittle(u16, '"'));
                     }
                 },
                 '\\' => {
@@ -383,24 +394,34 @@ pub const ArgIteratorWindows = struct {
                     try self.emitBackslashes(&buf, backslash_count);
                     backslash_count = 0;
                     if (in_quote) {
-                        try buf.append(byte);
+                        try buf.append(std.mem.nativeToLittle(u16, character));
                     } else {
-                        return buf.toOwnedSlice();
+                        return convertFromWindowsCmdLineToUTF8(allocator, buf.items);
                     }
                 },
                 else => {
                     try self.emitBackslashes(&buf, backslash_count);
                     backslash_count = 0;
-                    try buf.append(byte);
+                    try buf.append(std.mem.nativeToLittle(u16, character));
                 },
             }
         }
     }
 
-    fn emitBackslashes(self: *ArgIteratorWindows, buf: *std.ArrayListSentineled(u8, 0), emit_count: usize) !void {
+    fn convertFromWindowsCmdLineToUTF8(allocator: *Allocator, buf: []u16) NextError![:0]u8 {
+        return std.unicode.utf16leToUtf8AllocZ(allocator, buf) catch |err| switch (err) {
+            error.ExpectedSecondSurrogateHalf,
+            error.DanglingSurrogateHalf,
+            error.UnexpectedSecondSurrogateHalf,
+            => return error.InvalidCmdLine,
+
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
+    fn emitBackslashes(self: *ArgIteratorWindows, buf: *std.ArrayList(u16), emit_count: usize) !void {
         var i: usize = 0;
         while (i < emit_count) : (i += 1) {
-            try buf.append('\\');
+            try buf.append(std.mem.nativeToLittle(u16, '\\'));
         }
     }
 };
@@ -496,7 +517,8 @@ test "args iterator" {
     const given_suffix = std.fs.path.basename(prog_name);
 
     testing.expect(mem.eql(u8, expected_suffix, given_suffix));
-    testing.expectEqual(it.next(ga), null);
+    testing.expect(it.skip()); // Skip over zig_exe_path, passed to the test runner
+    testing.expect(it.next(ga) == null);
     testing.expect(!it.skip());
 }
 
@@ -552,14 +574,15 @@ pub fn argsFree(allocator: *mem.Allocator, args_alloc: []const [:0]u8) void {
 }
 
 test "windows arg parsing" {
-    testWindowsCmdLine("a   b\tc d", &[_][]const u8{ "a", "b", "c", "d" });
-    testWindowsCmdLine("\"abc\" d e", &[_][]const u8{ "abc", "d", "e" });
-    testWindowsCmdLine("a\\\\\\b d\"e f\"g h", &[_][]const u8{ "a\\\\\\b", "de fg", "h" });
-    testWindowsCmdLine("a\\\\\\\"b c d", &[_][]const u8{ "a\\\"b", "c", "d" });
-    testWindowsCmdLine("a\\\\\\\\\"b c\" d e", &[_][]const u8{ "a\\\\b c", "d", "e" });
-    testWindowsCmdLine("a   b\tc \"d f", &[_][]const u8{ "a", "b", "c", "d f" });
+    const utf16Literal = std.unicode.utf8ToUtf16LeStringLiteral;
+    testWindowsCmdLine(utf16Literal("a   b\tc d"), &[_][]const u8{ "a", "b", "c", "d" });
+    testWindowsCmdLine(utf16Literal("\"abc\" d e"), &[_][]const u8{ "abc", "d", "e" });
+    testWindowsCmdLine(utf16Literal("a\\\\\\b d\"e f\"g h"), &[_][]const u8{ "a\\\\\\b", "de fg", "h" });
+    testWindowsCmdLine(utf16Literal("a\\\\\\\"b c d"), &[_][]const u8{ "a\\\"b", "c", "d" });
+    testWindowsCmdLine(utf16Literal("a\\\\\\\\\"b c\" d e"), &[_][]const u8{ "a\\\\b c", "d", "e" });
+    testWindowsCmdLine(utf16Literal("a   b\tc \"d f"), &[_][]const u8{ "a", "b", "c", "d f" });
 
-    testWindowsCmdLine("\".\\..\\zig-cache\\build\" \"bin\\zig.exe\" \".\\..\" \".\\..\\zig-cache\" \"--help\"", &[_][]const u8{
+    testWindowsCmdLine(utf16Literal("\".\\..\\zig-cache\\build\" \"bin\\zig.exe\" \".\\..\" \".\\..\\zig-cache\" \"--help\""), &[_][]const u8{
         ".\\..\\zig-cache\\build",
         "bin\\zig.exe",
         ".\\..",
@@ -568,12 +591,12 @@ test "windows arg parsing" {
     });
 }
 
-fn testWindowsCmdLine(input_cmd_line: [*]const u8, expected_args: []const []const u8) void {
+fn testWindowsCmdLine(input_cmd_line: [*]const u16, expected_args: []const []const u8) void {
     var it = ArgIteratorWindows.initWithCmdLine(input_cmd_line);
     for (expected_args) |expected_arg| {
         const arg = it.next(std.testing.allocator).? catch unreachable;
         defer std.testing.allocator.free(arg);
-        testing.expectEqualSlices(u8, expected_arg, arg);
+        testing.expectEqualStrings(expected_arg, arg);
     }
     testing.expect(it.next(std.testing.allocator) == null);
 }
@@ -756,4 +779,62 @@ pub fn getSelfExeSharedLibPaths(allocator: *Allocator) error{OutOfMemory}![][:0]
         },
         else => @compileError("getSelfExeSharedLibPaths unimplemented for this target"),
     }
+}
+
+/// Tells whether calling the `execv` or `execve` functions will be a compile error.
+pub const can_execv = std.builtin.os.tag != .windows;
+
+pub const ExecvError = std.os.ExecveError || error{OutOfMemory};
+
+/// Replaces the current process image with the executed process.
+/// This function must allocate memory to add a null terminating bytes on path and each arg.
+/// It must also convert to KEY=VALUE\0 format for environment variables, and include null
+/// pointers after the args and after the environment variables.
+/// `argv[0]` is the executable path.
+/// This function also uses the PATH environment variable to get the full path to the executable.
+/// Due to the heap-allocation, it is illegal to call this function in a fork() child.
+/// For that use case, use the `std.os` functions directly.
+pub fn execv(allocator: *mem.Allocator, argv: []const []const u8) ExecvError {
+    return execve(allocator, argv, null);
+}
+
+/// Replaces the current process image with the executed process.
+/// This function must allocate memory to add a null terminating bytes on path and each arg.
+/// It must also convert to KEY=VALUE\0 format for environment variables, and include null
+/// pointers after the args and after the environment variables.
+/// `argv[0]` is the executable path.
+/// This function also uses the PATH environment variable to get the full path to the executable.
+/// Due to the heap-allocation, it is illegal to call this function in a fork() child.
+/// For that use case, use the `std.os` functions directly.
+pub fn execve(
+    allocator: *mem.Allocator,
+    argv: []const []const u8,
+    env_map: ?*const std.BufMap,
+) ExecvError {
+    if (!can_execv) @compileError("The target OS does not support execv");
+
+    var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+    defer arena_allocator.deinit();
+    const arena = &arena_allocator.allocator;
+
+    const argv_buf = try arena.allocSentinel(?[*:0]u8, argv.len, null);
+    for (argv) |arg, i| argv_buf[i] = (try arena.dupeZ(u8, arg)).ptr;
+
+    const envp = m: {
+        if (env_map) |m| {
+            const envp_buf = try child_process.createNullDelimitedEnvMap(arena, m);
+            break :m envp_buf.ptr;
+        } else if (std.builtin.link_libc) {
+            break :m std.c.environ;
+        } else if (std.builtin.output_mode == .Exe) {
+            // Then we have Zig start code and this works.
+            // TODO type-safety for null-termination of `os.environ`.
+            break :m @ptrCast([*:null]?[*:0]u8, os.environ.ptr);
+        } else {
+            // TODO come up with a solution for this.
+            @compileError("missing std lib enhancement: std.process.execv implementation has no way to collect the environment variables to forward to the child process");
+        }
+    };
+
+    return os.execvpeZ_expandArg0(.no_expand, argv_buf.ptr[0].?, argv_buf.ptr, envp);
 }

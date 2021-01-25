@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -41,7 +41,7 @@ fn renderRoot(
     for (tree.token_ids) |token_id, i| {
         if (token_id != .LineComment) break;
         const token_loc = tree.token_locs[i];
-        try ais.writer().print("{}\n", .{mem.trimRight(u8, tree.tokenSliceLoc(token_loc), " ")});
+        try ais.writer().print("{s}\n", .{mem.trimRight(u8, tree.tokenSliceLoc(token_loc), " ")});
         const next_token = tree.token_locs[i + 1];
         const loc = tree.tokenLocationLoc(token_loc.end, next_token);
         if (loc.line >= 2) {
@@ -790,8 +790,8 @@ fn renderExpression(
                         const section_exprs = row_exprs[0..section_end];
 
                         // Null stream for counting the printed length of each expression
-                        var line_find_stream = std.io.findByteOutStream('\n', std.io.null_out_stream);
-                        var counting_stream = std.io.countingOutStream(line_find_stream.writer());
+                        var line_find_stream = std.io.findByteWriter('\n', std.io.null_writer);
+                        var counting_stream = std.io.countingWriter(line_find_stream.writer());
                         var auto_indenting_stream = std.io.autoIndentingStream(indent_delta, counting_stream.writer());
 
                         // Calculate size of columns in current section
@@ -813,12 +813,10 @@ fn renderExpression(
                                     const expr_last_token = expr.*.lastToken() + 1;
                                     const next_expr = section_exprs[i + 1];
                                     const loc = tree.tokenLocation(tree.token_locs[expr_last_token].start, next_expr.*.firstToken());
-                                    if (loc.line == 0) {
-                                        column_counter += 1;
-                                    } else {
-                                        single_line = false;
-                                        column_counter = 0;
-                                    }
+
+                                    column_counter += 1;
+
+                                    if (loc.line != 0) single_line = false;
                                 } else {
                                     single_line = false;
                                     column_counter = 0;
@@ -956,7 +954,7 @@ fn renderExpression(
             const expr_outputs_one_line = blk: {
                 // render field expressions until a LF is found
                 for (field_inits) |field_init| {
-                    var find_stream = std.io.findByteOutStream('\n', std.io.null_out_stream);
+                    var find_stream = std.io.findByteWriter('\n', std.io.null_writer);
                     var auto_indenting_stream = std.io.autoIndentingStream(indent_delta, find_stream.writer());
 
                     try renderExpression(allocator, &auto_indenting_stream, tree, field_init, Space.None);
@@ -2235,10 +2233,10 @@ fn renderAsmOutput(
     try ais.writer().writeAll(" (");
 
     switch (asm_output.kind) {
-        ast.Node.Asm.Output.Kind.Variable => |variable_name| {
+        .Variable => |variable_name| {
             try renderExpression(allocator, ais, tree, &variable_name.base, Space.None);
         },
-        ast.Node.Asm.Output.Kind.Return => |return_type| {
+        .Return => |return_type| {
             try ais.writer().writeAll("-> ");
             try renderExpression(allocator, ais, tree, return_type, Space.None);
         },
@@ -2330,8 +2328,17 @@ fn renderVarDecl(
     }
 
     if (var_decl.getInitNode()) |init_node| {
-        const s = if (init_node.tag == .MultilineStringLiteral) Space.None else Space.Space;
-        try renderToken(tree, ais, var_decl.getEqToken().?, s); // =
+        const eq_token = var_decl.getEqToken().?;
+        const eq_space = blk: {
+            const loc = tree.tokenLocation(tree.token_locs[eq_token].end, tree.nextToken(eq_token));
+            break :blk if (loc.line == 0) Space.Space else Space.Newline;
+        };
+
+        {
+            ais.pushIndent();
+            defer ais.popIndent();
+            try renderToken(tree, ais, eq_token, eq_space); // =
+        }
         ais.pushIndentOneShot();
         try renderExpression(allocator, ais, tree, init_node, Space.None);
     }
@@ -2496,20 +2503,20 @@ fn renderTokenOffset(
 
     var loc = tree.tokenLocationLoc(token_loc.end, next_token_loc);
     if (loc.line == 0) {
-        try ais.writer().print(" {}", .{mem.trimRight(u8, tree.tokenSliceLoc(next_token_loc), " ")});
+        if (tree.token_ids[token_index] != .MultilineStringLiteralLine) {
+            try ais.writer().writeByte(' ');
+        }
+        try ais.writer().writeAll(mem.trimRight(u8, tree.tokenSliceLoc(next_token_loc), " "));
         offset = 2;
         token_loc = next_token_loc;
         next_token_loc = tree.token_locs[token_index + offset];
         next_token_id = tree.token_ids[token_index + offset];
         if (next_token_id != .LineComment) {
             switch (space) {
-                Space.None, Space.Space => {
+                .None, .Space, .SpaceOrOutdent => {
                     try ais.insertNewline();
                 },
-                Space.SpaceOrOutdent => {
-                    try ais.insertNewline();
-                },
-                Space.Newline => {
+                .Newline => {
                     if (next_token_id == .MultilineStringLiteralLine) {
                         return;
                     } else {
@@ -2517,8 +2524,8 @@ fn renderTokenOffset(
                         return;
                     }
                 },
-                Space.NoNewline => {},
-                Space.NoComment, Space.Comma, Space.BlockStart => unreachable,
+                .NoNewline => {},
+                .NoComment, .Comma, .BlockStart => unreachable,
             }
             return;
         }
@@ -2539,7 +2546,7 @@ fn renderTokenOffset(
         next_token_id = tree.token_ids[token_index + offset];
         if (next_token_id != .LineComment) {
             switch (space) {
-                Space.Newline => {
+                .Newline => {
                     if (next_token_id == .MultilineStringLiteralLine) {
                         return;
                     } else {
@@ -2547,14 +2554,11 @@ fn renderTokenOffset(
                         return;
                     }
                 },
-                Space.None, Space.Space => {
+                .None, .Space, .SpaceOrOutdent => {
                     try ais.insertNewline();
                 },
-                Space.SpaceOrOutdent => {
-                    try ais.insertNewline();
-                },
-                Space.NoNewline => {},
-                Space.NoComment, Space.Comma, Space.BlockStart => unreachable,
+                .NoNewline => {},
+                .NoComment, .Comma, .BlockStart => unreachable,
             }
             return;
         }
@@ -2675,6 +2679,8 @@ fn copyFixingWhitespace(ais: anytype, slice: []const u8) @TypeOf(ais.*).Error!vo
     };
 }
 
+// Returns the number of nodes in `expr` that are on the same line as `rtoken`,
+// or null if they all are on the same line.
 fn rowSize(tree: *ast.Tree, exprs: []*ast.Node, rtoken: ast.TokenIndex) ?usize {
     const first_token = exprs[0].firstToken();
     const first_loc = tree.tokenLocation(tree.token_locs[first_token].start, rtoken);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -467,7 +467,6 @@ test "std.PriorityQueue: update min heap" {
     expectEqual(@as(u32, 4), queue.remove());
     expectEqual(@as(u32, 5), queue.remove());
 }
-
 
 test "std.PriorityQueue: update same min heap" {
     var queue = PQ.init(testing.allocator, lessThan);

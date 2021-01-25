@@ -2,6 +2,43 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("lazy pointer with undefined element type",
+        \\export fn foo() void {
+        \\    comptime var T: type = undefined;
+        \\    const S = struct { x: *T };
+        \\    const I = @typeInfo(S);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:28: error: use of undefined value here causes undefined behavior",
+    });
+
+    cases.add("pointer arithmetic on pointer-to-array",
+        \\export fn foo() void {
+        \\    var x: [10]u8 = undefined;
+        \\    var y = &x;
+        \\    var z = y + 1;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:4:17: error: integer value 1 cannot be coerced to type '*[10]u8'",
+    });
+
+    cases.add("pointer attributes checked when coercing pointer to anon literal",
+        \\comptime {
+        \\    const c: [][]const u8 = &.{"hello", "world" };
+        \\}
+        \\comptime {
+        \\    const c: *[2][]const u8 = &.{"hello", "world" };
+        \\}
+        \\const S = struct {a: u8 = 1, b: u32 = 2};
+        \\comptime {
+        \\    const c: *S = &.{};
+        \\}
+    , &[_][]const u8{
+        "mp.zig:2:31: error: expected type '[][]const u8', found '*const struct:2:31'",
+        "mp.zig:5:33: error: expected type '*[2][]const u8', found '*const struct:5:33'",
+        "mp.zig:9:21: error: expected type '*S', found '*const struct:9:21'",
+    });
+
     cases.add("@Type() union payload is undefined",
         \\const Foo = @Type(@import("std").builtin.TypeInfo{
         \\    .Struct = undefined,
@@ -76,6 +113,26 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
             \\export fn entry() callconv(.Signal) void {}
         , &[_][]const u8{
             "tmp.zig:1:28: error: callconv 'Signal' is only available on AVR, not x86_64",
+        });
+        tc.target = std.zig.CrossTarget{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        };
+        break :x tc;
+    });
+    cases.addCase(x: {
+        var tc = cases.create("callconv(.Stdcall, .Fastcall, .Thiscall) on unsupported platform",
+            \\const F1 = fn () callconv(.Stdcall) void;
+            \\const F2 = fn () callconv(.Fastcall) void;
+            \\const F3 = fn () callconv(.Thiscall) void;
+            \\export fn entry1() void { var a: F1 = undefined; }
+            \\export fn entry2() void { var a: F2 = undefined; }
+            \\export fn entry3() void { var a: F3 = undefined; }
+        , &[_][]const u8{
+            "tmp.zig:1:27: error: callconv 'Stdcall' is only available on x86, not x86_64",
+            "tmp.zig:2:27: error: callconv 'Fastcall' is only available on x86, not x86_64",
+            "tmp.zig:3:27: error: callconv 'Thiscall' is only available on x86, not x86_64",
         });
         tc.target = std.zig.CrossTarget{
             .cpu_arch = .x86_64,
@@ -2346,8 +2403,13 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    const x = [_]u8;
         \\}
+        \\export fn entry2() void {
+        \\    const S = struct { a: *const [_]u8 };
+        \\    var a = .{ S{} };
+        \\}
     , &[_][]const u8{
         "tmp.zig:2:15: error: inferred array size invalid here",
+        "tmp.zig:5:34: error: inferred array size invalid here",
     });
 
     cases.add("initializing array with struct syntax",

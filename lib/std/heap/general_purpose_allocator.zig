@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -148,6 +148,16 @@ pub const Config = struct {
     /// Whether the allocator may be used simultaneously from multiple threads.
     thread_safe: bool = !std.builtin.single_threaded,
 
+    /// What type of mutex you'd like to use, for thread safety.
+    /// when specfied, the mutex type must have the same shape as `std.Thread.Mutex` and
+    /// `std.Thread.Mutex.Dummy`, and have no required fields. Specifying this field causes
+    /// the `thread_safe` field to be ignored.
+    ///
+    /// when null (default):
+    /// * the mutex type defaults to `std.Thread.Mutex` when thread_safe is enabled.
+    /// * the mutex type defaults to `std.Thread.Mutex.Dummy` otherwise.
+    MutexType: ?type = null,
+
     /// This is a temporary debugging trick you can use to turn segfaults into more helpful
     /// logged error messages with stack trace details. The downside is that every allocation
     /// will be leaked!
@@ -174,7 +184,12 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
         const total_requested_bytes_init = if (config.enable_memory_limit) @as(usize, 0) else {};
         const requested_memory_limit_init = if (config.enable_memory_limit) @as(usize, math.maxInt(usize)) else {};
 
-        const mutex_init = if (config.thread_safe) std.Mutex{} else std.mutex.Dummy{};
+        const mutex_init = if (config.MutexType) |T|
+            T{}
+        else if (config.thread_safe)
+            std.Thread.Mutex{}
+        else
+            std.Thread.Mutex.Dummy{};
 
         const stack_n = config.stack_trace_frames;
         const one_trace_size = @sizeOf(usize) * stack_n;
@@ -299,7 +314,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                         if (is_used) {
                             const slot_index = @intCast(SlotIndex, used_bits_byte * 8 + bit_index);
                             const stack_trace = bucketStackTrace(bucket, size_class, slot_index, .alloc);
-                            log.err("Memory leak detected: {}", .{stack_trace});
+                            log.err("Memory leak detected: {s}", .{stack_trace});
                             leaks = true;
                         }
                         if (bit_index == math.maxInt(u3))
@@ -327,7 +342,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
             }
             var it = self.large_allocations.iterator();
             while (it.next()) |large_alloc| {
-                log.err("Memory leak detected: {}", .{large_alloc.value.getStackTrace()});
+                log.err("Memory leak detected: {s}", .{large_alloc.value.getStackTrace()});
                 leaks = true;
             }
             return leaks;
@@ -428,7 +443,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                     .index = 0,
                 };
                 std.debug.captureStackTrace(ret_addr, &free_stack_trace);
-                log.err("Allocation size {} bytes does not match free size {}. Allocation: {} Free: {}", .{
+                log.err("Allocation size {d} bytes does not match free size {d}. Allocation: {s} Free: {s}", .{
                     entry.value.bytes.len,
                     old_mem.len,
                     entry.value.getStackTrace(),
@@ -511,13 +526,17 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                         .index = 0,
                     };
                     std.debug.captureStackTrace(ret_addr, &second_free_stack_trace);
-                    log.err("Double free detected. Allocation: {} First free: {} Second free: {}", .{
+                    log.err("Double free detected. Allocation: {s} First free: {s} Second free: {s}", .{
                         alloc_stack_trace,
                         free_stack_trace,
                         second_free_stack_trace,
                     });
                     if (new_size == 0) {
-                        // Recoverable.
+                        // Recoverable. Restore self.total_requested_bytes if needed, as we
+                        // don't return an error value so the errdefer above does not run.
+                        if (config.enable_memory_limit) {
+                            self.total_requested_bytes = prev_req_bytes;
+                        }
                         return @as(usize, 0);
                     }
                     @panic("Unrecoverable double free");
@@ -847,6 +866,18 @@ test "realloc large object to small object" {
     slice = try allocator.realloc(slice, 19);
     std.testing.expect(slice[0] == 0x12);
     std.testing.expect(slice[16] == 0x34);
+}
+
+test "overrideable mutexes" {
+    var gpa = GeneralPurposeAllocator(.{ .MutexType = std.Thread.Mutex }){
+        .backing_allocator = std.testing.allocator,
+        .mutex = std.Thread.Mutex{},
+    };
+    defer std.testing.expect(!gpa.deinit());
+    const allocator = &gpa.allocator;
+
+    const ptr = try allocator.create(i32);
+    defer allocator.destroy(ptr);
 }
 
 test "non-page-allocator backing allocator" {

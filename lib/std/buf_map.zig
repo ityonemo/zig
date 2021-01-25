@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -39,6 +39,7 @@ pub const BufMap = struct {
         const get_or_put = try self.hash_map.getOrPut(key);
         if (get_or_put.found_existing) {
             self.free(get_or_put.entry.key);
+            self.free(get_or_put.entry.value);
             get_or_put.entry.key = key;
         }
         get_or_put.entry.value = value;
@@ -88,7 +89,8 @@ pub const BufMap = struct {
 };
 
 test "BufMap" {
-    var bufmap = BufMap.init(std.testing.allocator);
+    const allocator = std.testing.allocator;
+    var bufmap = BufMap.init(allocator);
     defer bufmap.deinit();
 
     try bufmap.set("x", "1");
@@ -105,4 +107,7 @@ test "BufMap" {
 
     bufmap.delete("x");
     testing.expect(0 == bufmap.count());
+
+    try bufmap.setMove(try allocator.dupe(u8, "k"), try allocator.dupe(u8, "v1"));
+    try bufmap.setMove(try allocator.dupe(u8, "k"), try allocator.dupe(u8, "v2"));
 }

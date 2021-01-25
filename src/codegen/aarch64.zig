@@ -19,6 +19,8 @@ pub const Register = enum(u6) {
     w16, w17, w18, w19, w20, w21, w22, w23,
     w24, w25, w26, w27, w28, w29, w30, wzr,
 
+    pub const sp = Register.xzr;
+
     pub fn id(self: Register) u5 {
         return @truncate(u5, @enumToInt(self));
     }
@@ -62,7 +64,7 @@ pub const callee_preserved_regs = [_]Register{
 };
 
 pub const c_abi_int_param_regs = [_]Register{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7 };
-pub const c_abi_int_return_regs = [_]Register{ .x0, .x1 };
+pub const c_abi_int_return_regs = [_]Register{ .x0, .x1, .x2, .x3, .x4, .x5, .x6, .x7 };
 
 test "Register.id" {
     testing.expectEqual(@as(u5, 0), Register.x0.id());
@@ -70,6 +72,9 @@ test "Register.id" {
 
     testing.expectEqual(@as(u5, 31), Register.xzr.id());
     testing.expectEqual(@as(u5, 31), Register.wzr.id());
+
+    testing.expectEqual(@as(u5, 31), Register.sp.id());
+    testing.expectEqual(@as(u5, 31), Register.sp.id());
 }
 
 test "Register.size" {
@@ -219,6 +224,16 @@ pub const Instruction = union(enum) {
         fixed: u4 = 0b111_0,
         size: u2,
     },
+    LoadStorePairOfRegisters: packed struct {
+        rt1: u5,
+        rn: u5,
+        rt2: u5,
+        imm7: u7,
+        load: u1,
+        encoding: u2,
+        fixed: u5 = 0b101_0_0,
+        opc: u2,
+    },
     LoadLiteral: packed struct {
         rt: u5,
         imm19: u19,
@@ -248,138 +263,60 @@ pub const Instruction = union(enum) {
     NoOperation: packed struct {
         fixed: u32 = 0b1101010100_0_00_011_0010_0000_000_11111,
     },
+    LogicalShiftedRegister: packed struct {
+        rd: u5,
+        rn: u5,
+        imm6: u6,
+        rm: u5,
+        n: u1,
+        shift: u2,
+        fixed: u5 = 0b01010,
+        opc: u2,
+        sf: u1,
+    },
+    AddSubtractImmediate: packed struct {
+        rd: u5,
+        rn: u5,
+        imm12: u12,
+        sh: u1,
+        fixed: u6 = 0b100010,
+        s: u1,
+        op: u1,
+        sf: u1,
+    },
+
+    pub const Shift = struct {
+        shift: Type = .lsl,
+        amount: u6 = 0,
+
+        pub const Type = enum(u2) {
+            lsl,
+            lsr,
+            asr,
+            ror,
+        };
+
+        pub const none = Shift{
+            .shift = .lsl,
+            .amount = 0,
+        };
+    };
 
     pub fn toU32(self: Instruction) u32 {
         return switch (self) {
             .MoveWideImmediate => |v| @bitCast(u32, v),
             .PCRelativeAddress => |v| @bitCast(u32, v),
             .LoadStoreRegister => |v| @bitCast(u32, v),
+            .LoadStorePairOfRegisters => |v| @bitCast(u32, v),
             .LoadLiteral => |v| @bitCast(u32, v),
             .ExceptionGeneration => |v| @bitCast(u32, v),
             .UnconditionalBranchRegister => |v| @bitCast(u32, v),
             .UnconditionalBranchImmediate => |v| @bitCast(u32, v),
             .NoOperation => |v| @bitCast(u32, v),
+            .LogicalShiftedRegister => |v| @bitCast(u32, v),
+            .AddSubtractImmediate => |v| @bitCast(u32, v),
         };
     }
-
-    /// Represents the offset operand of a load or store instruction.
-    /// Data can be loaded from memory with either an immediate offset
-    /// or an offset that is stored in some register.
-    pub const Offset = union(enum) {
-        Immediate: union(enum) {
-            PostIndex: i9,
-            PreIndex: i9,
-            Unsigned: u12,
-        },
-        Register: struct {
-            rm: u5,
-            shift: union(enum) {
-                Uxtw: u2,
-                Lsl: u2,
-                Sxtw: u2,
-                Sxtx: u2,
-            },
-        },
-
-        pub const none = Offset{
-            .Immediate = .{ .Unsigned = 0 },
-        };
-
-        pub fn toU12(self: Offset) u12 {
-            return switch (self) {
-                .Immediate => |imm_type| switch (imm_type) {
-                    .PostIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 1,
-                    .PreIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 3,
-                    .Unsigned => |v| v,
-                },
-                .Register => |r| switch (r.shift) {
-                    .Uxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 16 + 2050,
-                    .Lsl => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 24 + 2050,
-                    .Sxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 48 + 2050,
-                    .Sxtx => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 56 + 2050,
-                },
-            };
-        }
-
-        pub fn imm(offset: u12) Offset {
-            return Offset{
-                .Immediate = .{ .Unsigned = offset },
-            };
-        }
-
-        pub fn imm_post_index(offset: i9) Offset {
-            return Offset{
-                .Immediate = .{ .PostIndex = offset },
-            };
-        }
-
-        pub fn imm_pre_index(offset: i9) Offset {
-            return Offset{
-                .Immediate = .{ .PreIndex = offset },
-            };
-        }
-
-        pub fn reg(rm: Register) Offset {
-            return Offset{
-                .Register = .{
-                    .rm = rm.id(),
-                    .shift = .{
-                        .Lsl = 0,
-                    },
-                },
-            };
-        }
-
-        pub fn reg_uxtw(rm: Register, shift: u2) Offset {
-            assert(rm.size() == 32 and (shift == 0 or shift == 2));
-            return Offset{
-                .Register = .{
-                    .rm = rm.id(),
-                    .shift = .{
-                        .Uxtw = shift,
-                    },
-                },
-            };
-        }
-
-        pub fn reg_lsl(rm: Register, shift: u2) Offset {
-            assert(rm.size() == 64 and (shift == 0 or shift == 3));
-            return Offset{
-                .Register = .{
-                    .rm = rm.id(),
-                    .shift = .{
-                        .Lsl = shift,
-                    },
-                },
-            };
-        }
-
-        pub fn reg_sxtw(rm: Register, shift: u2) Offset {
-            assert(rm.size() == 32 and (shift == 0 or shift == 2));
-            return Offset{
-                .Register = .{
-                    .rm = rm.id(),
-                    .shift = .{
-                        .Sxtw = shift,
-                    },
-                },
-            };
-        }
-
-        pub fn reg_sxtx(rm: Register, shift: u2) Offset {
-            assert(rm.size() == 64 and (shift == 0 or shift == 3));
-            return Offset{
-                .Register = .{
-                    .rm = rm.id(),
-                    .shift = .{
-                        .Sxtx = shift,
-                    },
-                },
-            };
-        }
-    };
-
-    // Helper functions for assembly syntax functions
 
     fn moveWideImmediate(
         opc: u2,
@@ -429,7 +366,124 @@ pub const Instruction = union(enum) {
         };
     }
 
-    fn loadStoreRegister(rt: Register, rn: Register, offset: Offset, load: bool) Instruction {
+    /// Represents the offset operand of a load or store instruction.
+    /// Data can be loaded from memory with either an immediate offset
+    /// or an offset that is stored in some register.
+    pub const LoadStoreOffset = union(enum) {
+        Immediate: union(enum) {
+            PostIndex: i9,
+            PreIndex: i9,
+            Unsigned: u12,
+        },
+        Register: struct {
+            rm: u5,
+            shift: union(enum) {
+                Uxtw: u2,
+                Lsl: u2,
+                Sxtw: u2,
+                Sxtx: u2,
+            },
+        },
+
+        pub const none = LoadStoreOffset{
+            .Immediate = .{ .Unsigned = 0 },
+        };
+
+        pub fn toU12(self: LoadStoreOffset) u12 {
+            return switch (self) {
+                .Immediate => |imm_type| switch (imm_type) {
+                    .PostIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 1,
+                    .PreIndex => |v| (@intCast(u12, @bitCast(u9, v)) << 2) + 3,
+                    .Unsigned => |v| v,
+                },
+                .Register => |r| switch (r.shift) {
+                    .Uxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 16 + 2050,
+                    .Lsl => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 24 + 2050,
+                    .Sxtw => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 48 + 2050,
+                    .Sxtx => |v| (@intCast(u12, r.rm) << 6) + (@intCast(u12, v) << 2) + 56 + 2050,
+                },
+            };
+        }
+
+        pub fn imm(offset: u12) LoadStoreOffset {
+            return .{
+                .Immediate = .{ .Unsigned = offset },
+            };
+        }
+
+        pub fn imm_post_index(offset: i9) LoadStoreOffset {
+            return .{
+                .Immediate = .{ .PostIndex = offset },
+            };
+        }
+
+        pub fn imm_pre_index(offset: i9) LoadStoreOffset {
+            return .{
+                .Immediate = .{ .PreIndex = offset },
+            };
+        }
+
+        pub fn reg(rm: Register) LoadStoreOffset {
+            return .{
+                .Register = .{
+                    .rm = rm.id(),
+                    .shift = .{
+                        .Lsl = 0,
+                    },
+                },
+            };
+        }
+
+        pub fn reg_uxtw(rm: Register, shift: u2) LoadStoreOffset {
+            assert(rm.size() == 32 and (shift == 0 or shift == 2));
+            return .{
+                .Register = .{
+                    .rm = rm.id(),
+                    .shift = .{
+                        .Uxtw = shift,
+                    },
+                },
+            };
+        }
+
+        pub fn reg_lsl(rm: Register, shift: u2) LoadStoreOffset {
+            assert(rm.size() == 64 and (shift == 0 or shift == 3));
+            return .{
+                .Register = .{
+                    .rm = rm.id(),
+                    .shift = .{
+                        .Lsl = shift,
+                    },
+                },
+            };
+        }
+
+        pub fn reg_sxtw(rm: Register, shift: u2) LoadStoreOffset {
+            assert(rm.size() == 32 and (shift == 0 or shift == 2));
+            return .{
+                .Register = .{
+                    .rm = rm.id(),
+                    .shift = .{
+                        .Sxtw = shift,
+                    },
+                },
+            };
+        }
+
+        pub fn reg_sxtx(rm: Register, shift: u2) LoadStoreOffset {
+            assert(rm.size() == 64 and (shift == 0 or shift == 3));
+            return .{
+                .Register = .{
+                    .rm = rm.id(),
+                    .shift = .{
+                        .Sxtx = shift,
+                    },
+                },
+            };
+        }
+    };
+
+    fn loadStoreRegister(rt: Register, rn: Register, offset: LoadStoreOffset, load: bool) Instruction {
         const off = offset.toU12();
         const op1: u2 = blk: {
             switch (offset) {
@@ -464,6 +518,49 @@ pub const Instruction = union(enum) {
                         .opc = opc,
                         .op1 = op1,
                         .size = 0b11,
+                    },
+                };
+            },
+            else => unreachable, // unexpected register size
+        }
+    }
+
+    fn loadStorePairOfRegisters(
+        rt1: Register,
+        rt2: Register,
+        rn: Register,
+        offset: i9,
+        encoding: u2,
+        load: bool,
+    ) Instruction {
+        switch (rt1.size()) {
+            32 => {
+                assert(-256 <= offset and offset <= 252);
+                const imm7 = @truncate(u7, @bitCast(u9, offset >> 2));
+                return Instruction{
+                    .LoadStorePairOfRegisters = .{
+                        .rt1 = rt1.id(),
+                        .rn = rn.id(),
+                        .rt2 = rt2.id(),
+                        .imm7 = imm7,
+                        .load = @boolToInt(load),
+                        .encoding = encoding,
+                        .opc = 0b00,
+                    },
+                };
+            },
+            64 => {
+                assert(-512 <= offset and offset <= 504);
+                const imm7 = @truncate(u7, @bitCast(u9, offset >> 3));
+                return Instruction{
+                    .LoadStorePairOfRegisters = .{
+                        .rt1 = rt1.id(),
+                        .rn = rn.id(),
+                        .rt2 = rt2.id(),
+                        .imm7 = imm7,
+                        .load = @boolToInt(load),
+                        .encoding = encoding,
+                        .opc = 0b10,
                     },
                 };
             },
@@ -543,6 +640,75 @@ pub const Instruction = union(enum) {
         };
     }
 
+    fn logicalShiftedRegister(
+        opc: u2,
+        n: u1,
+        shift: Shift,
+        rd: Register,
+        rn: Register,
+        rm: Register,
+    ) Instruction {
+        switch (rd.size()) {
+            32 => {
+                assert(shift.amount < 32);
+                return Instruction{
+                    .LogicalShiftedRegister = .{
+                        .rd = rd.id(),
+                        .rn = rn.id(),
+                        .imm6 = shift.amount,
+                        .rm = rm.id(),
+                        .n = n,
+                        .shift = @enumToInt(shift.shift),
+                        .opc = opc,
+                        .sf = 0b0,
+                    },
+                };
+            },
+            64 => {
+                return Instruction{
+                    .LogicalShiftedRegister = .{
+                        .rd = rd.id(),
+                        .rn = rn.id(),
+                        .imm6 = shift.amount,
+                        .rm = rm.id(),
+                        .n = n,
+                        .shift = @enumToInt(shift.shift),
+                        .opc = opc,
+                        .sf = 0b1,
+                    },
+                };
+            },
+            else => unreachable, // unexpected register size
+        }
+    }
+
+    fn addSubtractImmediate(
+        op: u1,
+        s: u1,
+        rd: Register,
+        rn: Register,
+        imm12: u12,
+        shift: bool,
+    ) Instruction {
+        return Instruction{
+            .AddSubtractImmediate = .{
+                .rd = rd.id(),
+                .rn = rn.id(),
+                .imm12 = imm12,
+                .sh = @boolToInt(shift),
+                .s = s,
+                .op = op,
+                .sf = switch (rd.size()) {
+                    32 => 0b0,
+                    64 => 0b1,
+                    else => unreachable, // unexpected register size
+                },
+            },
+        };
+    }
+
+    // Helper functions for assembly syntax functions
+
     // Move wide (immediate)
 
     pub fn movn(rd: Register, imm16: u16, shift: u6) Instruction {
@@ -569,24 +735,70 @@ pub const Instruction = union(enum) {
 
     // Load or store register
 
-    pub const LdrArgs = struct {
-        rn: ?Register = null,
-        offset: Offset = Offset.none,
-        literal: ?u19 = null,
+    pub const LdrArgs = union(enum) {
+        register: struct {
+            rn: Register,
+            offset: LoadStoreOffset = LoadStoreOffset.none,
+        },
+        literal: u19,
     };
+
     pub fn ldr(rt: Register, args: LdrArgs) Instruction {
-        if (args.rn) |rn| {
-            return loadStoreRegister(rt, rn, args.offset, true);
-        } else {
-            return loadLiteral(rt, args.literal.?);
+        switch (args) {
+            .register => |info| return loadStoreRegister(rt, info.rn, info.offset, true),
+            .literal => |literal| return loadLiteral(rt, literal),
         }
     }
 
     pub const StrArgs = struct {
-        offset: Offset = Offset.none,
+        offset: LoadStoreOffset = LoadStoreOffset.none,
     };
+
     pub fn str(rt: Register, rn: Register, args: StrArgs) Instruction {
         return loadStoreRegister(rt, rn, args.offset, false);
+    }
+
+    // Load or store pair of registers
+
+    pub const LoadStorePairOffset = struct {
+        encoding: enum(u2) {
+            PostIndex = 0b01,
+            Signed = 0b10,
+            PreIndex = 0b11,
+        },
+        offset: i9,
+
+        pub fn none() LoadStorePairOffset {
+            return .{ .encoding = .Signed, .offset = 0 };
+        }
+
+        pub fn post_index(imm: i9) LoadStorePairOffset {
+            return .{ .encoding = .PostIndex, .offset = imm };
+        }
+
+        pub fn pre_index(imm: i9) LoadStorePairOffset {
+            return .{ .encoding = .PreIndex, .offset = imm };
+        }
+
+        pub fn signed(imm: i9) LoadStorePairOffset {
+            return .{ .encoding = .Signed, .offset = imm };
+        }
+    };
+
+    pub fn ldp(rt1: Register, rt2: Register, rn: Register, offset: LoadStorePairOffset) Instruction {
+        return loadStorePairOfRegisters(rt1, rt2, rn, offset.offset, @enumToInt(offset.encoding), true);
+    }
+
+    pub fn ldnp(rt1: Register, rt2: Register, rn: Register, offset: i9) Instruction {
+        return loadStorePairOfRegisters(rt1, rt2, rn, offset, 0, true);
+    }
+
+    pub fn stp(rt1: Register, rt2: Register, rn: Register, offset: LoadStorePairOffset) Instruction {
+        return loadStorePairOfRegisters(rt1, rt2, rn, offset.offset, @enumToInt(offset.encoding), false);
+    }
+
+    pub fn stnp(rt1: Register, rt2: Register, rn: Register, offset: i9) Instruction {
+        return loadStorePairOfRegisters(rt1, rt2, rn, offset, 0, false);
     }
 
     // Exception generation
@@ -638,7 +850,59 @@ pub const Instruction = union(enum) {
     // Nop
 
     pub fn nop() Instruction {
-        return Instruction{ .NoOperation = {} };
+        return Instruction{ .NoOperation = .{} };
+    }
+
+    // Logical (shifted register)
+
+    pub fn @"and"(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b00, 0b0, shift, rd, rn, rm);
+    }
+
+    pub fn bic(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b00, 0b1, shift, rd, rn, rm);
+    }
+
+    pub fn orr(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b01, 0b0, shift, rd, rn, rm);
+    }
+
+    pub fn orn(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b01, 0b1, shift, rd, rn, rm);
+    }
+
+    pub fn eor(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b10, 0b0, shift, rd, rn, rm);
+    }
+
+    pub fn eon(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b10, 0b1, shift, rd, rn, rm);
+    }
+
+    pub fn ands(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b11, 0b0, shift, rd, rn, rm);
+    }
+
+    pub fn bics(rd: Register, rn: Register, rm: Register, shift: Shift) Instruction {
+        return logicalShiftedRegister(0b11, 0b1, shift, rd, rn, rm);
+    }
+
+    // Add/subtract (immediate)
+
+    pub fn add(rd: Register, rn: Register, imm: u12, shift: bool) Instruction {
+        return addSubtractImmediate(0b0, 0b0, rd, rn, imm, shift);
+    }
+
+    pub fn adds(rd: Register, rn: Register, imm: u12, shift: bool) Instruction {
+        return addSubtractImmediate(0b0, 0b1, rd, rn, imm, shift);
+    }
+
+    pub fn sub(rd: Register, rn: Register, imm: u12, shift: bool) Instruction {
+        return addSubtractImmediate(0b1, 0b0, rd, rn, imm, shift);
+    }
+
+    pub fn subs(rd: Register, rn: Register, imm: u12, shift: bool) Instruction {
+        return addSubtractImmediate(0b1, 0b1, rd, rn, imm, shift);
     }
 };
 
@@ -653,7 +917,15 @@ test "serialize instructions" {
     };
 
     const testcases = [_]Testcase{
-        .{ // movz x1 #4
+        .{ // orr x0, xzr, x1
+            .inst = Instruction.orr(.x0, .xzr, .x1, Instruction.Shift.none),
+            .expected = 0b1_01_01010_00_0_00001_000000_11111_00000,
+        },
+        .{ // orn x0, xzr, x1
+            .inst = Instruction.orn(.x0, .xzr, .x1, Instruction.Shift.none),
+            .expected = 0b1_01_01010_00_1_00001_000000_11111_00000,
+        },
+        .{ // movz x1, #4
             .inst = Instruction.movz(.x1, 4, 0),
             .expected = 0b1_10_100101_00_0000000000000100_00001,
         },
@@ -694,19 +966,19 @@ test "serialize instructions" {
             .expected = 0b1_00101_00_0000_0000_0000_0000_0000_0100,
         },
         .{ // ldr x2, [x1]
-            .inst = Instruction.ldr(.x2, .{ .rn = .x1 }),
+            .inst = Instruction.ldr(.x2, .{ .register = .{ .rn = .x1 } }),
             .expected = 0b11_111_0_01_01_000000000000_00001_00010,
         },
         .{ // ldr x2, [x1, #1]!
-            .inst = Instruction.ldr(.x2, .{ .rn = .x1, .offset = Instruction.Offset.imm_pre_index(1) }),
+            .inst = Instruction.ldr(.x2, .{ .register = .{ .rn = .x1, .offset = Instruction.LoadStoreOffset.imm_pre_index(1) } }),
             .expected = 0b11_111_0_00_01_0_000000001_11_00001_00010,
         },
         .{ // ldr x2, [x1], #-1
-            .inst = Instruction.ldr(.x2, .{ .rn = .x1, .offset = Instruction.Offset.imm_post_index(-1) }),
+            .inst = Instruction.ldr(.x2, .{ .register = .{ .rn = .x1, .offset = Instruction.LoadStoreOffset.imm_post_index(-1) } }),
             .expected = 0b11_111_0_00_01_0_111111111_01_00001_00010,
         },
         .{ // ldr x2, [x1], (x3)
-            .inst = Instruction.ldr(.x2, .{ .rn = .x1, .offset = Instruction.Offset.reg(.x3) }),
+            .inst = Instruction.ldr(.x2, .{ .register = .{ .rn = .x1, .offset = Instruction.LoadStoreOffset.reg(.x3) } }),
             .expected = 0b11_111_0_00_01_1_00011_011_0_10_00001_00010,
         },
         .{ // ldr x2, label
@@ -718,7 +990,7 @@ test "serialize instructions" {
             .expected = 0b11_111_0_01_00_000000000000_00001_00010,
         },
         .{ // str x2, [x1], (x3)
-            .inst = Instruction.str(.x2, .x1, .{ .offset = Instruction.Offset.reg(.x3) }),
+            .inst = Instruction.str(.x2, .x1, .{ .offset = Instruction.LoadStoreOffset.reg(.x3) }),
             .expected = 0b11_111_0_00_00_1_00011_011_0_10_00001_00010,
         },
         .{ // adr x2, #0x8
@@ -736,6 +1008,38 @@ test "serialize instructions" {
         .{ // adrp x2, -#0x8
             .inst = Instruction.adrp(.x2, -0x8),
             .expected = 0b1_00_10000_1111111111111111110_00010,
+        },
+        .{ // stp x1, x2, [sp, #8]
+            .inst = Instruction.stp(.x1, .x2, Register.sp, Instruction.LoadStorePairOffset.signed(8)),
+            .expected = 0b10_101_0_010_0_0000001_00010_11111_00001,
+        },
+        .{ // ldp x1, x2, [sp, #8]
+            .inst = Instruction.ldp(.x1, .x2, Register.sp, Instruction.LoadStorePairOffset.signed(8)),
+            .expected = 0b10_101_0_010_1_0000001_00010_11111_00001,
+        },
+        .{ // stp x1, x2, [sp, #-16]!
+            .inst = Instruction.stp(.x1, .x2, Register.sp, Instruction.LoadStorePairOffset.pre_index(-16)),
+            .expected = 0b10_101_0_011_0_1111110_00010_11111_00001,
+        },
+        .{ // ldp x1, x2, [sp], #16
+            .inst = Instruction.ldp(.x1, .x2, Register.sp, Instruction.LoadStorePairOffset.post_index(16)),
+            .expected = 0b10_101_0_001_1_0000010_00010_11111_00001,
+        },
+        .{ // and x0, x4, x2
+            .inst = Instruction.@"and"(.x0, .x4, .x2, .{}),
+            .expected = 0b1_00_01010_00_0_00010_000000_00100_00000,
+        },
+        .{ // and x0, x4, x2, lsl #0x8
+            .inst = Instruction.@"and"(.x0, .x4, .x2, .{ .shift = .lsl, .amount = 0x8 }),
+            .expected = 0b1_00_01010_00_0_00010_001000_00100_00000,
+        },
+        .{ // add x0, x10, #10
+            .inst = Instruction.add(.x0, .x10, 10, false),
+            .expected = 0b1_0_0_100010_0_0000_0000_1010_01010_00000,
+        },
+        .{ // subs x0, x5, #11, lsl #12
+            .inst = Instruction.subs(.x0, .x5, 11, true),
+            .expected = 0b1_1_1_100010_1_0000_0000_1011_00101_00000,
         },
     };
 

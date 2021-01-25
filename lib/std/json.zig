@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -1323,31 +1323,31 @@ test "Value.jsonStringify" {
     {
         var buffer: [10]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try @as(Value, .Null).jsonStringify(.{}, fbs.outStream());
+        try @as(Value, .Null).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "null");
     }
     {
         var buffer: [10]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try (Value{ .Bool = true }).jsonStringify(.{}, fbs.outStream());
+        try (Value{ .Bool = true }).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "true");
     }
     {
         var buffer: [10]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try (Value{ .Integer = 42 }).jsonStringify(.{}, fbs.outStream());
+        try (Value{ .Integer = 42 }).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "42");
     }
     {
         var buffer: [10]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try (Value{ .Float = 42 }).jsonStringify(.{}, fbs.outStream());
+        try (Value{ .Float = 42 }).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "4.2e+01");
     }
     {
         var buffer: [10]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try (Value{ .String = "weeee" }).jsonStringify(.{}, fbs.outStream());
+        try (Value{ .String = "weeee" }).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "\"weeee\"");
     }
     {
@@ -1360,7 +1360,7 @@ test "Value.jsonStringify" {
         };
         try (Value{
             .Array = Array.fromOwnedSlice(undefined, &vals),
-        }).jsonStringify(.{}, fbs.outStream());
+        }).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "[1,2,3]");
     }
     {
@@ -1369,7 +1369,7 @@ test "Value.jsonStringify" {
         var obj = ObjectMap.init(testing.allocator);
         defer obj.deinit();
         try obj.putNoClobber("a", .{ .String = "b" });
-        try (Value{ .Object = obj }).jsonStringify(.{}, fbs.outStream());
+        try (Value{ .Object = obj }).jsonStringify(.{}, fbs.writer());
         testing.expectEqualSlices(u8, fbs.getWritten(), "{\"a\":\"b\"}");
     }
 }
@@ -1553,7 +1553,7 @@ fn parseInternal(comptime T: type, token: Token, tokens: *TokenStream, options: 
                     const source_slice = stringToken.slice(tokens.slice, tokens.i - 1);
                     switch (stringToken.escapes) {
                         .None => mem.copy(u8, &r, source_slice),
-                        .Some => try unescapeString(&r, source_slice),
+                        .Some => try unescapeValidString(&r, source_slice),
                     }
                     return r;
                 },
@@ -1600,7 +1600,7 @@ fn parseInternal(comptime T: type, token: Token, tokens: *TokenStream, options: 
                                 .Some => |some_escapes| {
                                     const output = try allocator.alloc(u8, stringToken.decodedLength());
                                     errdefer allocator.free(output);
-                                    try unescapeString(output, source_slice);
+                                    try unescapeValidString(output, source_slice);
                                     return output;
                                 },
                             }
@@ -1897,7 +1897,7 @@ pub const Parser = struct {
 
     pub fn reset(p: *Parser) void {
         p.state = .Simple;
-        p.stack.shrink(0);
+        p.stack.shrinkAndFree(0);
     }
 
     pub fn parse(p: *Parser, input: []const u8) !ValueTree {
@@ -2084,7 +2084,7 @@ pub const Parser = struct {
             .Some => |some_escapes| {
                 const output = try allocator.alloc(u8, s.decodedLength());
                 errdefer allocator.free(output);
-                try unescapeString(output, slice);
+                try unescapeValidString(output, slice);
                 return Value{ .String = output };
             },
         }
@@ -2098,10 +2098,10 @@ pub const Parser = struct {
     }
 };
 
-// Unescape a JSON string
-// Only to be used on strings already validated by the parser
-// (note the unreachable statements and lack of bounds checking)
-fn unescapeString(output: []u8, input: []const u8) !void {
+/// Unescape a JSON string
+/// Only to be used on strings already validated by the parser
+/// (note the unreachable statements and lack of bounds checking)
+pub fn unescapeValidString(output: []u8, input: []const u8) !void {
     var inIndex: usize = 0;
     var outIndex: usize = 0;
 
@@ -2223,7 +2223,7 @@ test "write json then parse it" {
     var out_buffer: [1000]u8 = undefined;
 
     var fixed_buffer_stream = std.io.fixedBufferStream(&out_buffer);
-    const out_stream = fixed_buffer_stream.outStream();
+    const out_stream = fixed_buffer_stream.writer();
     var jw = writeStream(out_stream, 4);
 
     try jw.beginObject();
@@ -2620,9 +2620,9 @@ pub fn stringify(
 }
 
 fn teststringify(expected: []const u8, value: anytype, options: StringifyOptions) !void {
-    const ValidationOutStream = struct {
+    const ValidationWriter = struct {
         const Self = @This();
-        pub const OutStream = std.io.OutStream(*Self, Error, write);
+        pub const Writer = std.io.Writer(*Self, Error, write);
         pub const Error = error{
             TooMuchData,
             DifferentData,
@@ -2634,7 +2634,7 @@ fn teststringify(expected: []const u8, value: anytype, options: StringifyOptions
             return .{ .expected_remaining = exp };
         }
 
-        pub fn outStream(self: *Self) OutStream {
+        pub fn writer(self: *Self) Writer {
             return .{ .context = self };
         }
 
@@ -2642,9 +2642,9 @@ fn teststringify(expected: []const u8, value: anytype, options: StringifyOptions
             if (self.expected_remaining.len < bytes.len) {
                 std.debug.warn(
                     \\====== expected this output: =========
-                    \\{}
+                    \\{s}
                     \\======== instead found this: =========
-                    \\{}
+                    \\{s}
                     \\======================================
                 , .{
                     self.expected_remaining,
@@ -2655,9 +2655,9 @@ fn teststringify(expected: []const u8, value: anytype, options: StringifyOptions
             if (!mem.eql(u8, self.expected_remaining[0..bytes.len], bytes)) {
                 std.debug.warn(
                     \\====== expected this output: =========
-                    \\{}
+                    \\{s}
                     \\======== instead found this: =========
-                    \\{}
+                    \\{s}
                     \\======================================
                 , .{
                     self.expected_remaining[0..bytes.len],
@@ -2670,8 +2670,8 @@ fn teststringify(expected: []const u8, value: anytype, options: StringifyOptions
         }
     };
 
-    var vos = ValidationOutStream.init(expected);
-    try stringify(value, options, vos.outStream());
+    var vos = ValidationWriter.init(expected);
+    try stringify(value, options, vos.writer());
     if (vos.expected_remaining.len > 0) return error.NotEnoughData;
 }
 

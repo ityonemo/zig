@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -333,6 +333,24 @@ test "eqlIgnoreCase" {
     std.testing.expect(eqlIgnoreCase("HEl💩Lo!", "hel💩lo!"));
     std.testing.expect(!eqlIgnoreCase("hElLo!", "hello! "));
     std.testing.expect(!eqlIgnoreCase("hElLo!", "helro!"));
+}
+
+pub fn startsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return if (needle.len > haystack.len) false else eqlIgnoreCase(haystack[0..needle.len], needle);
+}
+
+test "ascii.startsWithIgnoreCase" {
+    std.testing.expect(startsWithIgnoreCase("boB", "Bo"));
+    std.testing.expect(!startsWithIgnoreCase("Needle in hAyStAcK", "haystack"));
+}
+
+pub fn endsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return if (needle.len > haystack.len) false else eqlIgnoreCase(haystack[haystack.len - needle.len ..], needle);
+}
+
+test "ascii.endsWithIgnoreCase" {
+    std.testing.expect(endsWithIgnoreCase("Needle in HaYsTaCk", "haystack"));
+    std.testing.expect(!endsWithIgnoreCase("BoB", "Bo"));
 }
 
 /// Finds `substr` in `container`, ignoring case, starting at `start_index`.

@@ -667,6 +667,33 @@ test "cast from anonymous struct to union" {
     comptime S.doTheTest();
 }
 
+test "cast from pointer to anonymous struct to pointer to union" {
+    const S = struct {
+        const U = union(enum) {
+            A: u32,
+            B: []const u8,
+            C: void,
+        };
+        fn doTheTest() void {
+            var y: u32 = 42;
+            const t0 = &.{ .A = 123 };
+            const t1 = &.{ .B = "foo" };
+            const t2 = &.{ .C = {} };
+            const t3 = &.{ .A = y };
+            const x0: *const U = t0;
+            var x1: *const U = t1;
+            const x2: *const U = t2;
+            var x3: *const U = t3;
+            expect(x0.A == 123);
+            expect(std.mem.eql(u8, x1.B, "foo"));
+            expect(x2.* == .C);
+            expect(x3.A == y);
+        }
+    };
+    S.doTheTest();
+    comptime S.doTheTest();
+}
+
 test "method call on an empty union" {
     const S = struct {
         const MyUnion = union(Tag) {
@@ -733,4 +760,46 @@ test "containers with single-field enums" {
 
     S.doTheTest();
     comptime S.doTheTest();
+}
+
+test "@unionInit on union w/ tag but no fields" {
+    const S = struct {
+        const Type = enum(u8) { no_op = 105 };
+
+        const Data = union(Type) {
+            no_op: void,
+
+            pub fn decode(buf: []const u8) Data {
+                return @unionInit(Data, "no_op", {});
+            }
+        };
+
+        comptime {
+            expect(@sizeOf(Data) != 0);
+        }
+
+        fn doTheTest() void {
+            var data: Data = .{ .no_op = .{} };
+            var o = Data.decode(&[_]u8{});
+            expectEqual(Type.no_op, o);
+        }
+    };
+
+    S.doTheTest();
+    comptime S.doTheTest();
+}
+
+test "union enum type gets a separate scope" {
+    const S = struct {
+        const U = union(enum) {
+            a: u8,
+            const foo = 1;
+        };
+
+        fn doTheTest() void {
+            expect(!@hasDecl(@TagType(U), "foo"));
+        }
+    };
+
+    S.doTheTest();
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -10,6 +10,9 @@ const testing = std.testing;
 
 /// Thread-safe, lock-free integer
 pub fn Int(comptime T: type) type {
+    if (!std.meta.trait.isIntegral(T))
+        @compileError("Expected integral type, got '" ++ @typeName(T) ++ "'");
+
     return extern struct {
         unprotected_value: T,
 
@@ -21,14 +24,26 @@ pub fn Int(comptime T: type) type {
 
         /// Read, Modify, Write
         pub fn rmw(self: *Self, comptime op: builtin.AtomicRmwOp, operand: T, comptime ordering: builtin.AtomicOrder) T {
+            switch (ordering) {
+                .Monotonic, .Acquire, .Release, .AcqRel, .SeqCst => {},
+                else => @compileError("Invalid ordering '" ++ @tagName(ordering) ++ "' for a RMW operation"),
+            }
             return @atomicRmw(T, &self.unprotected_value, op, operand, ordering);
         }
 
         pub fn load(self: *Self, comptime ordering: builtin.AtomicOrder) T {
+            switch (ordering) {
+                .Unordered, .Monotonic, .Acquire, .SeqCst => {},
+                else => @compileError("Invalid ordering '" ++ @tagName(ordering) ++ "' for a load operation"),
+            }
             return @atomicLoad(T, &self.unprotected_value, ordering);
         }
 
         pub fn store(self: *Self, value: T, comptime ordering: builtin.AtomicOrder) void {
+            switch (ordering) {
+                .Unordered, .Monotonic, .Release, .SeqCst => {},
+                else => @compileError("Invalid ordering '" ++ @tagName(ordering) ++ "' for a store operation"),
+            }
             @atomicStore(T, &self.unprotected_value, value, ordering);
         }
 

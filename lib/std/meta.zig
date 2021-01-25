@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -9,6 +9,7 @@ const debug = std.debug;
 const mem = std.mem;
 const math = std.math;
 const testing = std.testing;
+const root = @import("root");
 
 pub const trait = @import("meta/trait.zig");
 pub const TrailerFlags = @import("meta/trailer_flags.zig").TrailerFlags;
@@ -161,6 +162,13 @@ pub fn Elem(comptime T: type) type {
             },
             .Many, .C, .Slice => return info.child,
         },
+        .Optional => |info| switch (@typeInfo(info.child)) {
+            .Pointer => |ptr_info| switch (ptr_info.size) {
+                .Many => return ptr_info.child,
+                else => {},
+            },
+            else => {},
+        },
         else => {},
     }
     @compileError("Expected pointer, slice, array or vector type, found '" ++ @typeName(T) ++ "'");
@@ -173,6 +181,7 @@ test "std.meta.Elem" {
     testing.expect(Elem(*[10]u8) == u8);
     testing.expect(Elem(Vector(2, u8)) == u8);
     testing.expect(Elem(*Vector(2, u8)) == u8);
+    testing.expect(Elem(?[*]u8) == u8);
 }
 
 /// Given a type which can have a sentinel e.g. `[:0]u8`, returns the sentinel value,
@@ -211,6 +220,106 @@ fn testSentinel() void {
     testing.expect(sentinel([*]u8) == null);
     testing.expect(sentinel([5]u8) == null);
     testing.expect(sentinel(*const [5]u8) == null);
+}
+
+/// Given a "memory span" type, returns the same type except with the given sentinel value.
+pub fn Sentinel(comptime T: type, comptime sentinel_val: Elem(T)) type {
+    switch (@typeInfo(T)) {
+        .Pointer => |info| switch (info.size) {
+            .One => switch (@typeInfo(info.child)) {
+                .Array => |array_info| return @Type(.{
+                    .Pointer = .{
+                        .size = info.size,
+                        .is_const = info.is_const,
+                        .is_volatile = info.is_volatile,
+                        .alignment = info.alignment,
+                        .child = @Type(.{
+                            .Array = .{
+                                .len = array_info.len,
+                                .child = array_info.child,
+                                .sentinel = sentinel_val,
+                            },
+                        }),
+                        .is_allowzero = info.is_allowzero,
+                        .sentinel = info.sentinel,
+                    },
+                }),
+                else => {},
+            },
+            .Many, .Slice => return @Type(.{
+                .Pointer = .{
+                    .size = info.size,
+                    .is_const = info.is_const,
+                    .is_volatile = info.is_volatile,
+                    .alignment = info.alignment,
+                    .child = info.child,
+                    .is_allowzero = info.is_allowzero,
+                    .sentinel = sentinel_val,
+                },
+            }),
+            else => {},
+        },
+        .Optional => |info| switch (@typeInfo(info.child)) {
+            .Pointer => |ptr_info| switch (ptr_info.size) {
+                .Many => return @Type(.{
+                    .Optional = .{
+                        .child = @Type(.{
+                            .Pointer = .{
+                                .size = ptr_info.size,
+                                .is_const = ptr_info.is_const,
+                                .is_volatile = ptr_info.is_volatile,
+                                .alignment = ptr_info.alignment,
+                                .child = ptr_info.child,
+                                .is_allowzero = ptr_info.is_allowzero,
+                                .sentinel = sentinel_val,
+                            },
+                        }),
+                    },
+                }),
+                else => {},
+            },
+            else => {},
+        },
+        else => {},
+    }
+    @compileError("Unable to derive a sentinel pointer type from " ++ @typeName(T));
+}
+
+/// Takes a Slice or Many Pointer and returns it with the Type modified to have the given sentinel value.
+/// This function assumes the caller has verified the memory contains the sentinel value.
+pub fn assumeSentinel(p: anytype, comptime sentinel_val: Elem(@TypeOf(p))) Sentinel(@TypeOf(p), sentinel_val) {
+    const T = @TypeOf(p);
+    const ReturnType = Sentinel(T, sentinel_val);
+    switch (@typeInfo(T)) {
+        .Pointer => |info| switch (info.size) {
+            .Slice => return @bitCast(ReturnType, p),
+            .Many, .One => return @ptrCast(ReturnType, p),
+            .C => {},
+        },
+        .Optional => |info| switch (@typeInfo(info.child)) {
+            .Pointer => |ptr_info| switch (ptr_info.size) {
+                .Many => return @ptrCast(ReturnType, p),
+                else => {},
+            },
+            else => {},
+        },
+        else => {},
+    }
+    @compileError("Unable to derive a sentinel pointer type from " ++ @typeName(T));
+}
+
+test "std.meta.assumeSentinel" {
+    testing.expect([*:0]u8 == @TypeOf(assumeSentinel(@as([*]u8, undefined), 0)));
+    testing.expect([:0]u8 == @TypeOf(assumeSentinel(@as([]u8, undefined), 0)));
+    testing.expect([*:0]const u8 == @TypeOf(assumeSentinel(@as([*]const u8, undefined), 0)));
+    testing.expect([:0]const u8 == @TypeOf(assumeSentinel(@as([]const u8, undefined), 0)));
+    testing.expect([*:0]u16 == @TypeOf(assumeSentinel(@as([*]u16, undefined), 0)));
+    testing.expect([:0]const u16 == @TypeOf(assumeSentinel(@as([]const u16, undefined), 0)));
+    testing.expect([*:3]u8 == @TypeOf(assumeSentinel(@as([*:1]u8, undefined), 3)));
+    testing.expect([:null]?[*]u8 == @TypeOf(assumeSentinel(@as([]?[*]u8, undefined), null)));
+    testing.expect([*:null]?[*]u8 == @TypeOf(assumeSentinel(@as([*]?[*]u8, undefined), null)));
+    testing.expect(*[10:0]u8 == @TypeOf(assumeSentinel(@as(*[10]u8, undefined), 0)));
+    testing.expect(?[*:0]u8 == @TypeOf(assumeSentinel(@as(?[*]u8, undefined), 0)));
 }
 
 pub fn containerLayout(comptime T: type) TypeInfo.ContainerLayout {
@@ -378,19 +487,14 @@ test "std.meta.fields" {
     testing.expect(comptime uf[0].field_type == u8);
 }
 
-pub fn fieldInfo(comptime T: type, comptime field_name: []const u8) switch (@typeInfo(T)) {
+pub fn fieldInfo(comptime T: type, comptime field: FieldEnum(T)) switch (@typeInfo(T)) {
     .Struct => TypeInfo.StructField,
     .Union => TypeInfo.UnionField,
     .ErrorSet => TypeInfo.Error,
     .Enum => TypeInfo.EnumField,
     else => @compileError("Expected struct, union, error set or enum type, found '" ++ @typeName(T) ++ "'"),
 } {
-    inline for (comptime fields(T)) |field| {
-        if (comptime mem.eql(u8, field.name, field_name))
-            return field;
-    }
-
-    @compileError("'" ++ @typeName(T) ++ "' has no field '" ++ field_name ++ "'");
+    return fields(T)[@enumToInt(field)];
 }
 
 test "std.meta.fieldInfo" {
@@ -405,10 +509,10 @@ test "std.meta.fieldInfo" {
         a: u8,
     };
 
-    const e1f = comptime fieldInfo(E1, "A");
-    const e2f = comptime fieldInfo(E2, "A");
-    const sf = comptime fieldInfo(S1, "a");
-    const uf = comptime fieldInfo(U1, "a");
+    const e1f = fieldInfo(E1, .A);
+    const e2f = fieldInfo(E2, .A);
+    const sf = fieldInfo(S1, .a);
+    const uf = fieldInfo(U1, .a);
 
     testing.expect(mem.eql(u8, e1f.name, "A"));
     testing.expect(mem.eql(u8, e2f.name, "A"));
@@ -457,6 +561,43 @@ test "std.meta.fieldNames" {
     testing.expect(u1names.len == 2);
     testing.expectEqualSlices(u8, u1names[0], "a");
     testing.expectEqualSlices(u8, u1names[1], "b");
+}
+
+pub fn FieldEnum(comptime T: type) type {
+    const fieldInfos = fields(T);
+    var enumFields: [fieldInfos.len]std.builtin.TypeInfo.EnumField = undefined;
+    var decls = [_]std.builtin.TypeInfo.Declaration{};
+    inline for (fieldInfos) |field, i| {
+        enumFields[i] = .{
+            .name = field.name,
+            .value = i,
+        };
+    }
+    return @Type(.{
+        .Enum = .{
+            .layout = .Auto,
+            .tag_type = std.math.IntFittingRange(0, fieldInfos.len - 1),
+            .fields = &enumFields,
+            .decls = &decls,
+            .is_exhaustive = true,
+        },
+    });
+}
+
+fn expectEqualEnum(expected: anytype, actual: @TypeOf(expected)) void {
+    // TODO: https://github.com/ziglang/zig/issues/7419
+    // testing.expectEqual(@typeInfo(expected).Enum, @typeInfo(actual).Enum);
+    testing.expectEqual(@typeInfo(expected).Enum.layout, @typeInfo(actual).Enum.layout);
+    testing.expectEqual(@typeInfo(expected).Enum.tag_type, @typeInfo(actual).Enum.tag_type);
+    comptime testing.expectEqualSlices(std.builtin.TypeInfo.EnumField, @typeInfo(expected).Enum.fields, @typeInfo(actual).Enum.fields);
+    comptime testing.expectEqualSlices(std.builtin.TypeInfo.Declaration, @typeInfo(expected).Enum.decls, @typeInfo(actual).Enum.decls);
+    testing.expectEqual(@typeInfo(expected).Enum.is_exhaustive, @typeInfo(actual).Enum.is_exhaustive);
+}
+
+test "std.meta.FieldEnum" {
+    expectEqualEnum(enum { a }, FieldEnum(struct { a: u8 }));
+    expectEqualEnum(enum { a, b, c }, FieldEnum(struct { a: u8, b: void, c: f32 }));
+    expectEqualEnum(enum { a, b, c }, FieldEnum(union { a: u8, b: void, c: f32 }));
 }
 
 pub fn TagType(comptime T: type) type {
@@ -976,4 +1117,11 @@ test "Tuple" {
     TupleTester.assertTuple(.{u32}, Tuple(&[_]type{u32}));
     TupleTester.assertTuple(.{ u32, f16 }, Tuple(&[_]type{ u32, f16 }));
     TupleTester.assertTuple(.{ u32, f16, []const u8, void }, Tuple(&[_]type{ u32, f16, []const u8, void }));
+}
+
+/// TODO: https://github.com/ziglang/zig/issues/425
+pub fn globalOption(comptime name: []const u8, comptime T: type) ?T {
+    if (!@hasDecl(root, name))
+        return null;
+    return @as(T, @field(root, name));
 }

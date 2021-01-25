@@ -17,7 +17,9 @@
 #include <intrin.h>  
 #endif
 
-#include "config.h"
+#define ZIG_Q(x) #x
+#define ZIG_QUOTE(x) ZIG_Q(x)
+
 #include "util_base.hpp"
 #include "heap.hpp"
 #include "mem.hpp"
@@ -46,7 +48,6 @@ static inline int ctzll(unsigned long long mask) {
 #else
     if (_BitScanForward(&result, mask & 0xffffffff))
         return result;
-    }
     if (_BitScanForward(&result, mask >> 32))
         return 32 + result;
     zig_unreachable();

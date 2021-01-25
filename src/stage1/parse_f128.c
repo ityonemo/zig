@@ -3,6 +3,7 @@
 
 #include "parse_f128.h"
 #include "softfloat.h"
+#include "zigendian.h"
 #include <stddef.h>
 #include <sys/types.h>
 #include <errno.h>
@@ -47,8 +48,7 @@
 
 #define DECIMAL_DIG 36
 
-
-#if __BYTE_ORDER == __LITTLE_ENDIAN
+#if defined(ZIG_BYTE_ORDER) && ZIG_BYTE_ORDER == ZIG_LITTLE_ENDIAN
 union ldshape {
     float128_t f;
     struct {
@@ -62,7 +62,7 @@ union ldshape {
         uint64_t hi;
     } i2;
 };
-#elif __BYTE_ORDER == __BIG_ENDIAN
+#elif defined(ZIG_BYTE_ORDER) && ZIG_BYTE_ORDER == ZIG_BIG_ENDIAN
 union ldshape {
     float128_t f;
     struct {
@@ -76,6 +76,7 @@ union ldshape {
         uint64_t lo;
     } i2;
 };
+#else
 #error Unsupported endian
 #endif
 
@@ -761,7 +762,7 @@ static float128_t decfloat(struct MuslFILE *f, int c, int bits, int emin, int si
     }
 
     if ((e2+LDBL_MANT_DIG & INT_MAX) > emax-5) {
-        //if (fabsf128(y) >= 0x1p113) 
+        //if (fabsf128(y) >= 0x1p113)
         float128_t abs_y = fabsf128(y);
         float128_t mant_f128 = make_f128(0x4070000000000000, 0x0000000000000000);
         if (!f128M_lt(&abs_y, &mant_f128)) {

@@ -56,7 +56,9 @@ pub const Inst = struct {
         alloc,
         arg,
         assembly,
+        bitand,
         bitcast,
+        bitor,
         block,
         br,
         breakpoint,
@@ -71,9 +73,18 @@ pub const Inst = struct {
         condbr,
         constant,
         dbg_stmt,
-        isnonnull,
-        isnull,
-        iserr,
+        // ?T => bool
+        is_null,
+        // ?T => bool (inverted logic)
+        is_non_null,
+        // *?T => bool
+        is_null_ptr,
+        // *?T => bool (inverted logic)
+        is_non_null_ptr,
+        // E!T => bool
+        is_err,
+        // *E!T => bool
+        is_err_ptr,
         booland,
         boolor,
         /// Read a value from a pointer.
@@ -91,8 +102,12 @@ pub const Inst = struct {
         not,
         floatcast,
         intcast,
-        unwrap_optional,
+        // ?T => T
+        optional_payload,
+        // *?T => *T
+        optional_payload_ptr,
         wrap_optional,
+        xor,
         switchbr,
 
         pub fn Type(tag: Tag) type {
@@ -108,14 +123,18 @@ pub const Inst = struct {
                 .ret,
                 .bitcast,
                 .not,
-                .isnonnull,
-                .isnull,
-                .iserr,
+                .is_non_null,
+                .is_non_null_ptr,
+                .is_null,
+                .is_null_ptr,
+                .is_err,
+                .is_err_ptr,
                 .ptrtoint,
                 .floatcast,
                 .intcast,
                 .load,
-                .unwrap_optional,
+                .optional_payload,
+                .optional_payload_ptr,
                 .wrap_optional,
                 => UnOp,
 
@@ -130,6 +149,9 @@ pub const Inst = struct {
                 .store,
                 .booland,
                 .boolor,
+                .bitand,
+                .bitor,
+                .xor,
                 => BinOp,
 
                 .arg => Arg,
@@ -183,14 +205,14 @@ pub const Inst = struct {
     }
 
     pub fn Args(comptime T: type) type {
-        return std.meta.fieldInfo(T, "args").field_type;
+        return std.meta.fieldInfo(T, .args).field_type;
     }
 
     /// Returns `null` if runtime-known.
     pub fn value(base: *Inst) ?Value {
         if (base.ty.onePossibleValue()) |opv| return opv;
 
-        const inst = base.cast(Constant) orelse return null;
+        const inst = base.castTag(.constant) orelse return null;
         return inst.val;
     }
 

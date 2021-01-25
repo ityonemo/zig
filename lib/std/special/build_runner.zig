@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -41,14 +41,24 @@ pub fn main() !void {
         warn("Expected third argument to be cache root directory path\n", .{});
         return error.InvalidArgs;
     };
+    const global_cache_root = nextArg(args, &arg_idx) orelse {
+        warn("Expected third argument to be global cache root directory path\n", .{});
+        return error.InvalidArgs;
+    };
 
-    const builder = try Builder.create(allocator, zig_exe, build_root, cache_root);
+    const builder = try Builder.create(
+        allocator,
+        zig_exe,
+        build_root,
+        cache_root,
+        global_cache_root,
+    );
     defer builder.destroy();
 
     var targets = ArrayList([]const u8).init(allocator);
 
-    const stderr_stream = io.getStdErr().outStream();
-    const stdout_stream = io.getStdOut().outStream();
+    const stderr_stream = io.getStdErr().writer();
+    const stdout_stream = io.getStdOut().writer();
 
     while (nextArg(args, &arg_idx)) |arg| {
         if (mem.startsWith(u8, arg, "-D")) {
@@ -88,7 +98,7 @@ pub fn main() !void {
                     return usageAndErr(builder, false, stderr_stream);
                 };
                 builder.color = std.meta.stringToEnum(@TypeOf(builder.color), next_arg) orelse {
-                    warn("expected [auto|on|off] after --color, found '{}'", .{next_arg});
+                    warn("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
                     return usageAndErr(builder, false, stderr_stream);
                 };
             } else if (mem.eql(u8, arg, "--override-lib-dir")) {
@@ -116,7 +126,7 @@ pub fn main() !void {
                 builder.args = argsRest(args, arg_idx);
                 break;
             } else {
-                warn("Unrecognized argument: {}\n\n", .{arg});
+                warn("Unrecognized argument: {s}\n\n", .{arg});
                 return usageAndErr(builder, false, stderr_stream);
             }
         } else {
@@ -158,7 +168,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     }
 
     try out_stream.print(
-        \\Usage: {} build [steps] [options]
+        \\Usage: {s} build [steps] [options]
         \\
         \\Steps:
         \\
@@ -167,10 +177,10 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     const allocator = builder.allocator;
     for (builder.top_level_steps.items) |top_level_step| {
         const name = if (&top_level_step.step == builder.default_step)
-            try fmt.allocPrint(allocator, "{} (default)", .{top_level_step.step.name})
+            try fmt.allocPrint(allocator, "{s} (default)", .{top_level_step.step.name})
         else
             top_level_step.step.name;
-        try out_stream.print("  {s:<27} {}\n", .{ name, top_level_step.description });
+        try out_stream.print("  {s:<27} {s}\n", .{ name, top_level_step.description });
     }
 
     try out_stream.writeAll(
@@ -190,12 +200,12 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
         try out_stream.print("  (none)\n", .{});
     } else {
         for (builder.available_options_list.items) |option| {
-            const name = try fmt.allocPrint(allocator, "  -D{}=[{}]", .{
+            const name = try fmt.allocPrint(allocator, "  -D{s}=[{s}]", .{
                 option.name,
                 Builder.typeIdName(option.type_id),
             });
             defer allocator.free(name);
-            try out_stream.print("{s:<29} {}\n", .{ name, option.description });
+            try out_stream.print("{s:<29} {s}\n", .{ name, option.description });
         }
     }
 

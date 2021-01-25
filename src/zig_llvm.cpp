@@ -22,6 +22,7 @@
 
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/TargetTransformInfo.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/IRBuilder.h>
@@ -50,6 +51,7 @@
 #include <llvm/Transforms/IPO.h>
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/IPO/PassManagerBuilder.h>
+#include <llvm/Transforms/Instrumentation/ThreadSanitizer.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Utils.h>
 
@@ -91,6 +93,10 @@ char *ZigLLVMGetNativeFeatures(void) {
 
 static void addDiscriminatorsPass(const PassManagerBuilder &Builder, legacy::PassManagerBase &PM) {
     PM.add(createAddDiscriminatorsPass());
+}
+
+static void addThreadSanitizerPass(const PassManagerBuilder &Builder, legacy::PassManagerBase &PM) {
+    PM.add(createThreadSanitizerLegacyPassPass());
 }
 
 #ifndef NDEBUG
@@ -179,7 +185,7 @@ unsigned ZigLLVMDataLayoutGetProgramAddressSpace(LLVMTargetDataRef TD) {
 
 bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMModuleRef module_ref,
         char **error_message, bool is_debug,
-        bool is_small, bool time_report,
+        bool is_small, bool time_report, bool tsan, bool lto,
         const char *asm_filename, const char *bin_filename, const char *llvm_ir_filename)
 {
     TimePassesIsEnabled = time_report;
@@ -229,7 +235,7 @@ bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMM
     PMBuilder->VerifyInput = assertions_on;
     PMBuilder->VerifyOutput = assertions_on;
     PMBuilder->MergeFunctions = !is_debug;
-    PMBuilder->PrepareForLTO = false;
+    PMBuilder->PrepareForLTO = lto;
     PMBuilder->PrepareForThinLTO = false;
     PMBuilder->PerformThinLTO = false;
 
@@ -243,6 +249,11 @@ bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMM
 
         PMBuilder->addExtension(PassManagerBuilder::EP_EarlyAsPossible, addDiscriminatorsPass);
         PMBuilder->Inliner = createFunctionInliningPass(PMBuilder->OptLevel, PMBuilder->SizeLevel, false);
+    }
+
+    if (tsan) {
+        PMBuilder->addExtension(PassManagerBuilder::EP_OptimizerLast, addThreadSanitizerPass);
+        PMBuilder->addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0, addThreadSanitizerPass);
     }
 
     // Set up the per-function pass manager.
@@ -262,7 +273,7 @@ bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMM
         PMBuilder->populateModulePassManager(MPM);
 
         // Set output passes.
-        if (dest_bin) {
+        if (dest_bin && !lto) {
             if (target_machine->addPassesToEmitFile(MPM, *dest_bin, nullptr, CGFT_ObjectFile)) {
                 *error_message = strdup("TargetMachine can't emit an object file");
                 return true;
@@ -288,6 +299,9 @@ bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMM
             if (LLVMPrintModuleToFile(module_ref, llvm_ir_filename, error_message)) {
                 return true;
             }
+        }
+        if (dest_bin && lto) {
+            WriteBitcodeToFile(*module, *dest_bin);
         }
 
         if (time_report) {
@@ -1056,39 +1070,24 @@ bool ZigLLVMWriteArchive(const char *archive_name, const char **file_names, size
     return false;
 }
 
+int ZigLLDLinkCOFF(int argc, const char **argv, bool can_exit_early) {
+    std::vector<const char *> args(argv, argv + argc);
+    return lld::coff::link(args, can_exit_early, llvm::outs(), llvm::errs());
+}
 
-bool ZigLLDLink(ZigLLVM_ObjectFormatType oformat, const char **args, size_t arg_count,
-        void (*append_diagnostic)(void *, const char *, size_t),
-        void *context_stdout, void *context_stderr)
-{
-    ArrayRef<const char *> array_ref_args(args, arg_count);
+int ZigLLDLinkELF(int argc, const char **argv, bool can_exit_early) {
+    std::vector<const char *> args(argv, argv + argc);
+    return lld::elf::link(args, can_exit_early, llvm::outs(), llvm::errs());
+}
 
-    MyOStream diag_stdout(append_diagnostic, context_stdout);
-    MyOStream diag_stderr(append_diagnostic, context_stderr);
+int ZigLLDLinkMachO(int argc, const char **argv, bool can_exit_early) {
+    std::vector<const char *> args(argv, argv + argc);
+    return lld::mach_o::link(args, can_exit_early, llvm::outs(), llvm::errs());
+}
 
-    switch (oformat) {
-        case ZigLLVM_UnknownObjectFormat:
-        case ZigLLVM_XCOFF:
-            assert(false); // unreachable
-            break;
-
-        case ZigLLVM_COFF:
-            return lld::coff::link(array_ref_args, false, diag_stdout, diag_stderr);
-
-        case ZigLLVM_ELF:
-            return lld::elf::link(array_ref_args, false, diag_stdout, diag_stderr);
-
-        case ZigLLVM_MachO:
-            return lld::mach_o::link(array_ref_args, false, diag_stdout, diag_stderr);
-
-        case ZigLLVM_Wasm:
-            return lld::wasm::link(array_ref_args, false, diag_stdout, diag_stderr);
-
-        default:
-            break;
-    }
-    assert(false); // unreachable
-    abort();
+int ZigLLDLinkWasm(int argc, const char **argv, bool can_exit_early) {
+    std::vector<const char *> args(argv, argv + argc);
+    return lld::wasm::link(args, can_exit_early, llvm::outs(), llvm::errs());
 }
 
 static AtomicRMWInst::BinOp toLLVMRMWBinOp(enum ZigLLVM_AtomicRMWBinOp BinOp) {

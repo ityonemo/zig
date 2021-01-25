@@ -100,8 +100,11 @@ pub fn deinit(self: *Wasm) void {
 // Generate code for the Decl, storing it in memory to be later written to
 // the file on flush().
 pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
-    if (decl.typed_value.most_recent.typed_value.ty.zigTypeTag() != .Fn)
+    const typed_value = decl.typed_value.most_recent.typed_value;
+    if (typed_value.ty.zigTypeTag() != .Fn)
         return error.TODOImplementNonFnDeclsForWasm;
+    if (typed_value.val.tag() == .extern_fn)
+        return error.TODOImplementExternFnDeclsForWasm;
 
     if (decl.fn_link.wasm) |*fn_data| {
         fn_data.functype.items.len = 0;
@@ -115,10 +118,29 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
 
     var managed_functype = fn_data.functype.toManaged(self.base.allocator);
     var managed_code = fn_data.code.toManaged(self.base.allocator);
-    try codegen.genFunctype(&managed_functype, decl);
-    try codegen.genCode(&managed_code, decl);
-    fn_data.functype = managed_functype.toUnmanaged();
-    fn_data.code = managed_code.toUnmanaged();
+
+    var context = codegen.Context{
+        .gpa = self.base.allocator,
+        .values = codegen.ValueTable.init(self.base.allocator),
+        .code = managed_code,
+        .func_type_data = managed_functype,
+        .decl = decl,
+        .err_msg = undefined,
+    };
+    defer context.values.deinit();
+
+    // generate the 'code' section for the function declaration
+    context.gen() catch |err| switch (err) {
+        error.CodegenFail => {
+            decl.analysis = .codegen_failure;
+            try module.failed_decls.put(module.gpa, decl, context.err_msg);
+            return;
+        },
+        else => |e| return err,
+    };
+
+    fn_data.functype = context.func_type_data.toUnmanaged();
+    fn_data.code = context.code.toUnmanaged();
 }
 
 pub fn updateDeclExports(
@@ -282,6 +304,11 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         break :blk full_obj_path;
     } else null;
 
+    const compiler_rt_path: ?[]const u8 = if (self.base.options.include_compiler_rt)
+        comp.compiler_rt_static_lib.?.full_object_path
+    else
+        null;
+
     const target = self.base.options.target;
 
     const id_symlink_basename = "lld.id";
@@ -302,6 +329,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             _ = try man.addFile(entry.key.status.success.object_path, null);
         }
         try man.addOptionalFile(module_obj_path);
+        try man.addOptionalFile(compiler_rt_path);
         man.hash.addOptional(self.base.options.stack_size_override);
         man.hash.addListOfBytes(self.base.options.extra_lld_args);
 
@@ -315,7 +343,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             id_symlink_basename,
             &prev_digest_buf,
         ) catch |err| blk: {
-            log.debug("WASM LLD new_digest={} error: {}", .{ digest, @errorName(err) });
+            log.debug("WASM LLD new_digest={} error: {s}", .{ digest, @errorName(err) });
             // Handle this as a cache miss.
             break :blk prev_digest_buf[0..0];
         };
@@ -334,130 +362,174 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         };
     }
 
-    const is_obj = self.base.options.output_mode == .Obj;
+    const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
 
-    // Create an LLD command line and invoke it.
-    var argv = std.ArrayList([]const u8).init(self.base.allocator);
-    defer argv.deinit();
-    // The first argument is ignored as LLD is called as a library, set it
-    // anyway to the correct LLD driver name for this target so that it's
-    // correctly printed when `verbose_link` is true. This is needed for some
-    // tools such as CMake when Zig is used as C compiler.
-    try argv.append("ld-wasm");
-    if (is_obj) {
-        try argv.append("-r");
-    }
+    if (self.base.options.output_mode == .Obj) {
+        // LLD's WASM driver does not support the equvialent of `-r` so we do a simple file copy
+        // here. TODO: think carefully about how we can avoid this redundant operation when doing
+        // build-obj. See also the corresponding TODO in linkAsArchive.
+        const the_object_path = blk: {
+            if (self.base.options.objects.len != 0)
+                break :blk self.base.options.objects[0];
 
-    try argv.append("-error-limit=0");
+            if (comp.c_object_table.count() != 0)
+                break :blk comp.c_object_table.items()[0].key.status.success.object_path;
 
-    if (self.base.options.output_mode == .Exe) {
-        // Increase the default stack size to a more reasonable value of 1MB instead of
-        // the default of 1 Wasm page being 64KB, unless overriden by the user.
-        try argv.append("-z");
-        const stack_size = self.base.options.stack_size_override orelse 1048576;
-        const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
-        try argv.append(arg);
+            if (module_obj_path) |p|
+                break :blk p;
 
-        // Put stack before globals so that stack overflow results in segfault immediately
-        // before corrupting globals. See https://github.com/ziglang/zig/issues/4496
-        try argv.append("--stack-first");
+            // TODO I think this is unreachable. Audit this situation when solving the above TODO
+            // regarding eliding redundant object -> object transformations.
+            return error.NoObjectsToLink;
+        };
+        // This can happen when using --enable-cache and using the stage1 backend. In this case
+        // we can skip the file copy.
+        if (!mem.eql(u8, the_object_path, full_out_path)) {
+            try fs.cwd().copyFile(the_object_path, fs.cwd(), full_out_path, .{});
+        }
     } else {
-        try argv.append("--no-entry"); // So lld doesn't look for _start.
-        try argv.append("--export-all");
-    }
-    try argv.appendSlice(&[_][]const u8{
-        "--allow-undefined",
-        "-o",
-        try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path}),
-    });
+        const is_obj = self.base.options.output_mode == .Obj;
 
-    // Positional arguments to the linker such as object files.
-    try argv.appendSlice(self.base.options.objects);
+        // Create an LLD command line and invoke it.
+        var argv = std.ArrayList([]const u8).init(self.base.allocator);
+        defer argv.deinit();
+        // We will invoke ourselves as a child process to gain access to LLD.
+        // This is necessary because LLD does not behave properly as a library -
+        // it calls exit() and does not reset all global data between invocations.
+        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "wasm-ld" });
+        if (is_obj) {
+            try argv.append("-r");
+        }
 
-    for (comp.c_object_table.items()) |entry| {
-        try argv.append(entry.key.status.success.object_path);
-    }
-    if (module_obj_path) |p| {
-        try argv.append(p);
-    }
+        try argv.append("-error-limit=0");
 
-    if (self.base.options.output_mode != .Obj and !self.base.options.is_compiler_rt_or_libc) {
-        if (!self.base.options.link_libc) {
+        if (self.base.options.lto) {
+            switch (self.base.options.optimize_mode) {
+                .Debug => {},
+                .ReleaseSmall => try argv.append("-O2"),
+                .ReleaseFast, .ReleaseSafe => try argv.append("-O3"),
+            }
+        }
+
+        if (self.base.options.output_mode == .Exe) {
+            // Increase the default stack size to a more reasonable value of 1MB instead of
+            // the default of 1 Wasm page being 64KB, unless overriden by the user.
+            try argv.append("-z");
+            const stack_size = self.base.options.stack_size_override orelse 1048576;
+            const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
+            try argv.append(arg);
+
+            // Put stack before globals so that stack overflow results in segfault immediately
+            // before corrupting globals. See https://github.com/ziglang/zig/issues/4496
+            try argv.append("--stack-first");
+        } else {
+            try argv.append("--no-entry"); // So lld doesn't look for _start.
+            try argv.append("--export-all");
+        }
+        try argv.appendSlice(&[_][]const u8{
+            "--allow-undefined",
+            "-o",
+            full_out_path,
+        });
+
+        // Positional arguments to the linker such as object files.
+        try argv.appendSlice(self.base.options.objects);
+
+        for (comp.c_object_table.items()) |entry| {
+            try argv.append(entry.key.status.success.object_path);
+        }
+        if (module_obj_path) |p| {
+            try argv.append(p);
+        }
+
+        if (self.base.options.output_mode != .Obj and
+            !self.base.options.skip_linker_dependencies and
+            !self.base.options.link_libc)
+        {
             try argv.append(comp.libc_static_lib.?.full_object_path);
         }
-        try argv.append(comp.compiler_rt_static_lib.?.full_object_path);
-    }
 
-    if (self.base.options.verbose_link) {
-        Compilation.dump_argv(argv.items);
-    }
+        if (compiler_rt_path) |p| {
+            try argv.append(p);
+        }
 
-    const new_argv = try arena.allocSentinel(?[*:0]const u8, argv.items.len, null);
-    for (argv.items) |arg, i| {
-        new_argv[i] = try arena.dupeZ(u8, arg);
-    }
+        if (self.base.options.verbose_link) {
+            // Skip over our own name so that the LLD linker name is the first argv item.
+            Compilation.dump_argv(argv.items[1..]);
+        }
 
-    var stderr_context: LLDContext = .{
-        .wasm = self,
-        .data = std.ArrayList(u8).init(self.base.allocator),
-    };
-    defer stderr_context.data.deinit();
-    var stdout_context: LLDContext = .{
-        .wasm = self,
-        .data = std.ArrayList(u8).init(self.base.allocator),
-    };
-    defer stdout_context.data.deinit();
-    const llvm = @import("../llvm.zig");
-    const ok = llvm.Link(
-        .Wasm,
-        new_argv.ptr,
-        new_argv.len,
-        append_diagnostic,
-        @ptrToInt(&stdout_context),
-        @ptrToInt(&stderr_context),
-    );
-    if (stderr_context.oom or stdout_context.oom) return error.OutOfMemory;
-    if (stdout_context.data.items.len != 0) {
-        std.log.warn("unexpected LLD stdout: {}", .{stdout_context.data.items});
-    }
-    if (!ok) {
-        // TODO parse this output and surface with the Compilation API rather than
-        // directly outputting to stderr here.
-        std.debug.print("{}", .{stderr_context.data.items});
-        return error.LLDReportedFailure;
-    }
-    if (stderr_context.data.items.len != 0) {
-        std.log.warn("unexpected LLD stderr: {}", .{stderr_context.data.items});
+        // Sadly, we must run LLD as a child process because it does not behave
+        // properly as a library.
+        const child = try std.ChildProcess.init(argv.items, arena);
+        defer child.deinit();
+
+        if (comp.clang_passthrough_mode) {
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+
+            const term = child.spawnAndWait() catch |err| {
+                log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                return error.UnableToSpawnSelf;
+            };
+            switch (term) {
+                .Exited => |code| {
+                    if (code != 0) {
+                        // TODO https://github.com/ziglang/zig/issues/6342
+                        std.process.exit(1);
+                    }
+                },
+                else => std.process.abort(),
+            }
+        } else {
+            child.stdin_behavior = .Ignore;
+            child.stdout_behavior = .Ignore;
+            child.stderr_behavior = .Pipe;
+
+            try child.spawn();
+
+            const stderr = try child.stderr.?.reader().readAllAlloc(arena, 10 * 1024 * 1024);
+
+            const term = child.wait() catch |err| {
+                log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                return error.UnableToSpawnSelf;
+            };
+
+            switch (term) {
+                .Exited => |code| {
+                    if (code != 0) {
+                        // TODO parse this output and surface with the Compilation API rather than
+                        // directly outputting to stderr here.
+                        std.debug.print("{s}", .{stderr});
+                        return error.LLDReportedFailure;
+                    }
+                },
+                else => {
+                    log.err("{s} terminated with stderr:\n{s}", .{ argv.items[0], stderr });
+                    return error.LLDCrashed;
+                },
+            }
+
+            if (stderr.len != 0) {
+                log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+            }
+        }
     }
 
     if (!self.base.options.disable_lld_caching) {
         // Update the file with the digest. If it fails we can continue; it only
         // means that the next invocation will have an unnecessary cache miss.
         Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-            std.log.warn("failed to save linking hash digest symlink: {}", .{@errorName(err)});
+            log.warn("failed to save linking hash digest symlink: {s}", .{@errorName(err)});
         };
         // Again failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
-            std.log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
+            log.warn("failed to write cache manifest when linking: {s}", .{@errorName(err)});
         };
         // We hang on to this lock so that the output file path can be used without
         // other processes clobbering it.
         self.base.lock = man.toOwnedLock();
     }
-}
-
-const LLDContext = struct {
-    data: std.ArrayList(u8),
-    wasm: *Wasm,
-    oom: bool = false,
-};
-
-fn append_diagnostic(context: usize, ptr: [*]const u8, len: usize) callconv(.C) void {
-    const lld_context = @intToPtr(*LLDContext, context);
-    const msg = ptr[0..len];
-    lld_context.data.appendSlice(msg) catch |err| switch (err) {
-        error.OutOfMemory => lld_context.oom = true,
-    };
 }
 
 /// Get the current index of a given Decl in the function list

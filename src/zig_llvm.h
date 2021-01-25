@@ -48,7 +48,7 @@ ZIG_EXTERN_C char *ZigLLVMGetNativeFeatures(void);
 
 ZIG_EXTERN_C bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMModuleRef module_ref,
         char **error_message, bool is_debug,
-        bool is_small, bool time_report,
+        bool is_small, bool time_report, bool tsan, bool lto,
         const char *asm_filename, const char *bin_filename, const char *llvm_ir_filename);
 
 
@@ -507,9 +507,10 @@ ZIG_EXTERN_C const char *ZigLLVMGetVendorTypeName(enum ZigLLVM_VendorType vendor
 ZIG_EXTERN_C const char *ZigLLVMGetOSTypeName(enum ZigLLVM_OSType os);
 ZIG_EXTERN_C const char *ZigLLVMGetEnvironmentTypeName(enum ZigLLVM_EnvironmentType abi);
 
-ZIG_EXTERN_C bool ZigLLDLink(enum ZigLLVM_ObjectFormatType oformat, const char **args, size_t arg_count,
-        void (*append_diagnostic)(void *, const char *, size_t),
-        void *context_stdout, void *context_stderr);
+ZIG_EXTERN_C int ZigLLDLinkCOFF(int argc, const char **argv, bool can_exit_early);
+ZIG_EXTERN_C int ZigLLDLinkELF(int argc, const char **argv, bool can_exit_early);
+ZIG_EXTERN_C int ZigLLDLinkMachO(int argc, const char **argv, bool can_exit_early);
+ZIG_EXTERN_C int ZigLLDLinkWasm(int argc, const char **argv, bool can_exit_early);
 
 ZIG_EXTERN_C bool ZigLLVMWriteArchive(const char *archive_name, const char **file_names, size_t file_name_count,
         enum ZigLLVM_OSType os_type);

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -691,9 +691,6 @@ test "realpath" {
 test "open file with exclusive nonblocking lock twice" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
-
     const filename = "file_nonblocking_lock_test.txt";
 
     var tmp = tmpDir(.{});
@@ -709,9 +706,6 @@ test "open file with exclusive nonblocking lock twice" {
 test "open file with shared and exclusive nonblocking lock" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
-
     const filename = "file_nonblocking_lock_test.txt";
 
     var tmp = tmpDir(.{});
@@ -726,9 +720,6 @@ test "open file with shared and exclusive nonblocking lock" {
 
 test "open file with exclusive and shared nonblocking lock" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
 
     const filename = "file_nonblocking_lock_test.txt";
 
@@ -750,11 +741,6 @@ test "open file with exclusive lock twice, make sure it waits" {
         return error.SkipZigTest;
     }
 
-    if (std.Target.current.os.tag == .windows) {
-        // https://github.com/ziglang/zig/issues/7010
-        return error.SkipZigTest;
-    }
-
     const filename = "file_lock_test.txt";
 
     var tmp = tmpDir(.{});
@@ -764,7 +750,7 @@ test "open file with exclusive lock twice, make sure it waits" {
     errdefer file.close();
 
     const S = struct {
-        const C = struct { dir: *fs.Dir, evt: *std.ResetEvent };
+        const C = struct { dir: *fs.Dir, evt: *std.Thread.ResetEvent };
         fn checkFn(ctx: C) !void {
             const file1 = try ctx.dir.createFile(filename, .{ .lock = .Exclusive });
             defer file1.close();
@@ -772,27 +758,27 @@ test "open file with exclusive lock twice, make sure it waits" {
         }
     };
 
-    var evt = std.ResetEvent.init();
+    var evt: std.Thread.ResetEvent = undefined;
+    try evt.init();
     defer evt.deinit();
 
     const t = try std.Thread.spawn(S.C{ .dir = &tmp.dir, .evt = &evt }, S.checkFn);
     defer t.wait();
 
     const SLEEP_TIMEOUT_NS = 10 * std.time.ns_per_ms;
-
-    std.time.sleep(SLEEP_TIMEOUT_NS);
-    // Check that createFile is still waiting for the lock to be released.
-    testing.expect(!evt.isSet());
+    // Make sure we've slept enough.
+    var timer = try std.time.Timer.start();
+    while (true) {
+        std.time.sleep(SLEEP_TIMEOUT_NS);
+        if (timer.read() >= SLEEP_TIMEOUT_NS) break;
+    }
     file.close();
-    // Generous timeout to avoid failures on heavily loaded systems.
-    try evt.timedWait(SLEEP_TIMEOUT_NS);
+    // No timeout to avoid failures on heavily loaded systems.
+    evt.wait();
 }
 
 test "open file with exclusive nonblocking lock twice (absolute paths)" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
 
     const allocator = testing.allocator;
 
@@ -807,4 +793,43 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
     testing.expectError(error.WouldBlock, file2);
 
     try fs.deleteFileAbsolute(filename);
+}
+
+test "walker" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var allocator = &arena.allocator;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const nb_dirs = 8;
+
+    var i: usize = 0;
+    var sub_dir = tmp.dir;
+    while (i < nb_dirs) : (i += 1) {
+        const dir_name = try std.fmt.allocPrint(allocator, "{}", .{i});
+        try sub_dir.makeDir(dir_name);
+        sub_dir = try sub_dir.openDir(dir_name, .{});
+    }
+
+    const tmp_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+
+    var walker = try fs.walkPath(testing.allocator, tmp_path);
+    defer walker.deinit();
+
+    i = 0;
+    var expected_dir_name: []const u8 = "";
+    while (i < nb_dirs) : (i += 1) {
+        const name = try std.fmt.allocPrint(allocator, "{}", .{i});
+        expected_dir_name = if (expected_dir_name.len == 0)
+            name
+        else
+            try fs.path.join(allocator, &[_][]const u8{ expected_dir_name, name });
+
+        var entry = (try walker.next()).?;
+        testing.expectEqualStrings(expected_dir_name, try fs.path.relative(allocator, tmp_path, entry.path));
+    }
 }

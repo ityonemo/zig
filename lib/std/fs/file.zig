@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -117,7 +117,7 @@ pub const File = struct {
         truncate: bool = true,
 
         /// Ensures that this open call creates the file, otherwise causes
-        /// `error.FileAlreadyExists` to be returned.
+        /// `error.PathAlreadyExists` to be returned.
         exclusive: bool = false,
 
         /// Open the file with a lock to prevent other processes from accessing it at the
@@ -394,7 +394,7 @@ pub const File = struct {
         var array_list = try std.ArrayListAligned(u8, alignment).initCapacity(allocator, initial_cap);
         defer array_list.deinit();
 
-        self.reader().readAllArrayList(&array_list, max_bytes) catch |err| switch (err) {
+        self.reader().readAllArrayListAligned(alignment, &array_list, max_bytes) catch |err| switch (err) {
             error.StreamTooLong => return error.FileTooBig,
             else => |e| return e,
         };
@@ -459,6 +459,7 @@ pub const File = struct {
         return index;
     }
 
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn readv(self: File, iovecs: []const os.iovec) ReadError!usize {
         if (is_windows) {
             // TODO improve this to use ReadFileScatter
@@ -479,6 +480,7 @@ pub const File = struct {
     /// is not an error condition.
     /// The `iovecs` parameter is mutable because this function needs to mutate the fields in
     /// order to handle partial reads from the underlying OS layer.
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn readvAll(self: File, iovecs: []os.iovec) ReadError!usize {
         if (iovecs.len == 0) return;
 
@@ -500,6 +502,7 @@ pub const File = struct {
         }
     }
 
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn preadv(self: File, iovecs: []const os.iovec, offset: u64) PReadError!usize {
         if (is_windows) {
             // TODO improve this to use ReadFileScatter
@@ -520,6 +523,7 @@ pub const File = struct {
     /// is not an error condition.
     /// The `iovecs` parameter is mutable because this function needs to mutate the fields in
     /// order to handle partial reads from the underlying OS layer.
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn preadvAll(self: File, iovecs: []const os.iovec, offset: u64) PReadError!void {
         if (iovecs.len == 0) return;
 
@@ -582,6 +586,7 @@ pub const File = struct {
         }
     }
 
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn writev(self: File, iovecs: []const os.iovec_const) WriteError!usize {
         if (is_windows) {
             // TODO improve this to use WriteFileScatter
@@ -599,6 +604,7 @@ pub const File = struct {
 
     /// The `iovecs` parameter is mutable because this function needs to mutate the fields in
     /// order to handle partial writes from the underlying OS layer.
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn writevAll(self: File, iovecs: []os.iovec_const) WriteError!void {
         if (iovecs.len == 0) return;
 
@@ -615,6 +621,7 @@ pub const File = struct {
         }
     }
 
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn pwritev(self: File, iovecs: []os.iovec_const, offset: u64) PWriteError!usize {
         if (is_windows) {
             // TODO improve this to use WriteFileScatter
@@ -632,6 +639,7 @@ pub const File = struct {
 
     /// The `iovecs` parameter is mutable because this function needs to mutate the fields in
     /// order to handle partial writes from the underlying OS layer.
+    /// See https://github.com/ziglang/zig/issues/7699
     pub fn pwritevAll(self: File, iovecs: []os.iovec_const, offset: u64) PWriteError!void {
         if (iovecs.len == 0) return;
 
@@ -690,7 +698,7 @@ pub const File = struct {
         header_count: usize = 0,
     };
 
-    pub const WriteFileError = ReadError || WriteError;
+    pub const WriteFileError = ReadError || error{EndOfStream} || WriteError;
 
     pub fn writeFileAll(self: File, in_file: File, args: WriteFileOptions) WriteFileError!void {
         return self.writeFileAllSendfile(in_file, args) catch |err| switch (err) {
@@ -698,6 +706,8 @@ pub const File = struct {
             error.FastOpenAlreadyInProgress,
             error.MessageTooBig,
             error.FileDescriptorNotASocket,
+            error.NetworkUnreachable,
+            error.NetworkSubsystemFailed,
             => return self.writeFileAllUnseekable(in_file, args),
 
             else => |e| return e,
@@ -712,23 +722,14 @@ pub const File = struct {
 
         try self.writevAll(headers);
 
-        var buffer: [4096]u8 = undefined;
-        {
-            var index: usize = 0;
-            // Skip in_offset bytes.
-            while (index < args.in_offset) {
-                const ask = math.min(buffer.len, args.in_offset - index);
-                const amt = try in_file.read(buffer[0..ask]);
-                index += amt;
-            }
-        }
-        const in_len = args.in_len orelse math.maxInt(u64);
-        var index: usize = 0;
-        while (index < in_len) {
-            const ask = math.min(buffer.len, in_len - index);
-            const amt = try in_file.read(buffer[0..ask]);
-            if (amt == 0) break;
-            index += try self.write(buffer[0..amt]);
+        try in_file.reader().skipBytes(args.in_offset, .{ .buf_size = 4096 });
+
+        var fifo = std.fifo.LinearFifo(u8, .{ .Static = 4096 }).init();
+        if (args.in_len) |len| {
+            var stream = std.io.limitedReader(in_file.reader(), len);
+            try fifo.pump(stream.reader(), self.writer());
+        } else {
+            try fifo.pump(in_file.reader(), self.writer());
         }
 
         try self.writevAll(trailers);
@@ -803,29 +804,13 @@ pub const File = struct {
 
     pub const Reader = io.Reader(File, ReadError, read);
 
-    /// Deprecated: use `Reader`
-    pub const InStream = Reader;
-
     pub fn reader(file: File) Reader {
-        return .{ .context = file };
-    }
-
-    /// Deprecated: use `reader`
-    pub fn inStream(file: File) Reader {
         return .{ .context = file };
     }
 
     pub const Writer = io.Writer(File, WriteError, write);
 
-    /// Deprecated: use `Writer`
-    pub const OutStream = Writer;
-
     pub fn writer(file: File) Writer {
-        return .{ .context = file };
-    }
-
-    /// Deprecated: use `writer`
-    pub fn outStream(file: File) Writer {
         return .{ .context = file };
     }
 
