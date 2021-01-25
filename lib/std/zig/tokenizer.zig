@@ -409,8 +409,11 @@ pub const Tokenizer = struct {
         period_2,
         period_asterisk,
         saw_at_sign,
-        maybe_infix,
-        maybe_infix_unicode_internal,
+        // infix function parser states
+        maybe_infix_first_ascii,
+        maybe_infix_first_unicode_internal,
+        maybe_infix_second_ascii,
+        ascii_after_unicode_infix,
     };
 
     fn isIdentifierChar(char: u8) bool {
@@ -940,25 +943,24 @@ pub const Tokenizer = struct {
                         result.id = .AngleBracketLeft;
                         break;
                     },
+                    '#'...'&', '!', '*'...'/', '?'...'Z', 'a'...'z', '^', '_', '|', '~' => {
+                        state = .maybe_infix_first_ascii;
+                    },
                     0xc0...0xdf => { // 110xxxxx
-                        state = .maybe_infix_unicode_internal;
+                        state = .maybe_infix_first_unicode_internal;
                         remaining_code_units = 1;
                     },
                     0xe0...0xef => { // 1110xxxx
-                        state = .maybe_infix_unicode_internal;
+                        state = .maybe_infix_first_unicode_internal;
                         remaining_code_units = 2;
                     },
                     0xf0...0xf7 => { // 11110xxx
-                        state = .maybe_infix_unicode_internal;
+                        state = .maybe_infix_first_unicode_internal;
                         remaining_code_units = 3;
                     },
                     else => {
-                        if (self.index == self.buffer.len - 1) {
-                            result.id = .AngleBracketLeft;
-                            break;
-                        } else {
-                            state = .maybe_infix;
-                        }
+                        result.id = .AngleBracketLeft;
+                        break;
                     },
                 },
 
@@ -1332,11 +1334,15 @@ pub const Tokenizer = struct {
                         break;
                     },
                 },
-                .maybe_infix => switch (c) {
+                .maybe_infix_first_ascii => switch (c) {
                     '>' => {
                         self.index += 1;
                         result.id = .InfixFn;
                         break;
+                    },
+                    // note that this list adds in the `prime` character:
+                    '#'...'&', '!', '*'...'/', '?'...'Z', 'a'...'z', '0'...'9', '^', '\'', '_', '|', '~' => {
+                        state = .maybe_infix_second_ascii;
                     },
                     else => {
                         // reinterpet as normal less-than
@@ -1345,18 +1351,54 @@ pub const Tokenizer = struct {
                         break;
                     }
                 },
-                .maybe_infix_unicode_internal => switch (c) {
-                    '>' => {
-                        self.index += 1;
-                        result.id = .InfixFn;
-                        break;
-                    },
+                .maybe_infix_first_unicode_internal => switch (c) {
+                    // unicode completion
                     0x80...0xbf => {
                         if (remaining_code_units == 0) {
                             result.id = .Invalid;
                             break;
                         }
                         remaining_code_units -= 1;
+                    },
+                    // assuming the rcu's are 0:
+                    // completed the infix function tag
+                    '>' => {
+                        if (remaining_code_units != 0) {
+                            result.id = .Invalid;
+                        }
+                        self.index += 1;
+                        result.id = .InfixFn;
+                        break;
+                    },
+                    // starting a second character
+                    '#'...'&', '!', '*'...'/', '?'...'Z', 'a'...'z', '0'...'9', '^', '\'', '_', '|', '~' => {
+                        state = .ascii_after_unicode_infix;
+                    },
+                    else => {
+                        result.id = .Invalid;
+                        break;
+                    }
+                },
+                .maybe_infix_second_ascii => switch (c) {
+                    '>' => {
+                        self.index += 1;
+                        result.id = .InfixFn;
+                        break;
+                    },
+                    else => {
+                        // reinterpet as normal less-than
+                        result.id = .AngleBracketLeft;
+                        self.index -= 2;
+                        break;
+                    }
+                },
+                .ascii_after_unicode_infix => switch (c) {
+                    // assuming the rcu's are 0:
+                    // complete the infix function tag
+                    '>' => {
+                        self.index += 1;
+                        result.id = .InfixFn;
+                        break;
                     },
                     else => {
                         result.id = .Invalid;
@@ -1415,8 +1457,8 @@ pub const Tokenizer = struct {
                 .char_literal_end,
                 .char_literal_unicode,
                 .string_literal_backslash,
-                .maybe_infix,
-                .maybe_infix_unicode_internal,
+                .maybe_infix_first_unicode_internal,
+                .ascii_after_unicode_infix
                 => {
                     result.id = .Invalid;
                 },
@@ -1484,6 +1526,15 @@ pub const Tokenizer = struct {
                 .minus_percent => {
                     result.id = .MinusPercent;
                 },
+
+                .maybe_infix_first_ascii => {
+                    result.id = .AngleBracketLeft;
+                    self.index -= 1;
+                },
+                .maybe_infix_second_ascii => {
+                    result.id = .AngleBracketLeft;
+                    self.index -= 2;
+                }
             }
         }
 
@@ -2014,10 +2065,20 @@ test "tokenizer - number literals octal" {
 
 test "tokenizer - infix function" {
     testTokenize("<+>", &[_]Token.Id{ .InfixFn });
-    testTokenize("<a", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
-    testTokenize("<abc", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
     // and also with special unicode characters
     testTokenize("<⊕>", &[_]Token.Id{ .InfixFn });
+    // either, with second ascii character
+    testTokenize("<+'>", &[_]Token.Id{ .InfixFn });
+    testTokenize("<+o>", &[_]Token.Id{ .InfixFn });
+    testTokenize("<+1>", &[_]Token.Id{ .InfixFn });
+    testTokenize("<⊕'>", &[_]Token.Id{ .InfixFn });
+    testTokenize("<⊕o>", &[_]Token.Id{ .InfixFn });
+    testTokenize("<⊕1>", &[_]Token.Id{ .InfixFn });
+
+    // incomplete forms
+    testTokenize("<a", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
+    testTokenize("<ab", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
+    testTokenize("<abc", &[_]Token.Id{ .AngleBracketLeft, .Identifier });
 }
 
 test "tokenizer - number literals hexadeciaml" {

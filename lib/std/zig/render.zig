@@ -2702,7 +2702,7 @@ fn rowSize(tree: *ast.Tree, exprs: []*ast.Node, rtoken: ast.TokenIndex) ?usize {
 // code for validating special binary infix functions.
 
 const InfixTokens = enum {
-    LeftAngle, RightAngle, Unicode, OneMoreCodeUnit, TwoMoreCodeUnits, ThreeMoreCodeUnits
+    LeftAngle, RightAngle, MaybeUnicode, Ascii
 };
 
 fn isCallInfixFunction(tree: *ast.Tree, base: *ast.Node) bool {
@@ -2710,12 +2710,20 @@ fn isCallInfixFunction(tree: *ast.Tree, base: *ast.Node) bool {
         const casted_node = base.cast(ast.Node.OneToken).?;
         const token_loc = tree.token_locs[casted_node.token];
         var token = tree.tokenSliceLoc(token_loc)[0..];
-        if (!validateInfix(&token, .LeftAngle)) return false;
-        if (!validateInfix(&token, .Unicode)) return false;
+        if (!validateInfix(&token, .LeftAngle)) {
+            return false;
+        }
+        if (!validateInfix(&token, .MaybeUnicode)) {
+            if (!validateInfix(&token, .Ascii)) {
+                return false;
+            }
+        }
         // one character case
-        if (validateInfix(&token, .RightAngle)) return true;
+        if (validateInfix(&token, .RightAngle)) {
+            return true;
+        }
         // two character case
-        if (!validateInfix(&token, .Unicode)) {
+        if (validateInfix(&token, .Ascii)) {
             return validateInfix(&token, .RightAngle);
         }
     }
@@ -2727,50 +2735,11 @@ fn validateInfix(token: *[]const u8, comptime validates: InfixTokens) bool {
         return false;
     }
 
-    var result: bool = undefined;
-
-    result = switch (validates) {
+    const result = switch (validates) {
         .LeftAngle => token.*[0] == '<',
         .RightAngle => (token.len == 1) and (token.*[0] == '>'),
-        .Unicode => switch (token.*[0]) {
-            // ASCII.  Not going to check validity of actual character here.
-            0x00...0x7f => true,
-            // 110xxxxx
-            0xc0...0xdf => {
-                token.* = token.*[1..];
-                // prevent advancing the token at the end (we just advanced it)
-                return validateInfix(token, .OneMoreCodeUnit);
-            },
-            // 1110xxxx
-            0xe0...0xef => {
-                token.* = token.*[1..];
-                // prevent advancing the token at the end (we just advanced it)
-                return validateInfix(token, .TwoMoreCodeUnits);
-            },
-            // 11110xxx
-            0xf0...0xf7 => {
-                token.* = token.*[1..];
-                // prevent advancing the token at the end (we just advanced it)
-                return validateInfix(token, .ThreeMoreCodeUnits);
-            },
-            else => unreachable,
-        },
-        // return early so that it doesn't advance the token twice.
-        .OneMoreCodeUnit => token.*[0] >= 0x80 and token.*[0] < 0xC0,
-        .TwoMoreCodeUnits => {
-            if (token.*[0] < 0x80 or token.*[0] >= 0xC0) {
-                return false;
-            }
-            token.* = token.*[1..];
-            return validateInfix(token, .OneMoreCodeUnit);
-        },
-        .ThreeMoreCodeUnits => {
-            if (token.*[0] < 0x80 or token.*[0] >= 0xC0) {
-                return false;
-            }
-            token.* = token.*[1..];
-            return validateInfix(token, .TwoMoreCodeUnits);
-        },
+        .MaybeUnicode => validateInfixUnicode(token),
+        .Ascii => validateInfixAscii(token),
     };
 
     // advance the token only on success
@@ -2779,4 +2748,60 @@ fn validateInfix(token: *[]const u8, comptime validates: InfixTokens) bool {
     }
 
     return result;
+}
+
+fn validateInfixAscii(token: *[]const u8) bool {
+    if (token.len < 1) {
+        return false;
+    }
+    switch (token.*[0]) {
+        '#'...'&', '!', '*'...'/', '?'...'Z', 'a'...'z', '0'...'9', '^', '\'', '_', '|', '~' => {
+            // advance the token.
+            token.* = token.*[1..];
+            return true;
+        },
+        else => {
+            return false;
+        }
+    }
+
+}
+
+fn validateInfixUnicode(token: *[]const u8) bool {
+    switch (token.*[0]) {
+        // 110xxxxx
+        0xc0...0xdf => {
+            if ((token.len < 2) or invalidUnicodeInternal(token.*[1])) {
+                return false;
+            }
+            token.* = token.*[1..];
+            return true;
+        },
+        // 1110xxxx
+        0xe0...0xef => {
+            if ((token.len < 3) or
+                invalidUnicodeInternal(token.*[1]) or
+                invalidUnicodeInternal(token.*[2])) {
+                return false;
+            }
+            token.* = token.*[2..];
+            return true;
+        },
+        // 11110xxx
+        0xf0...0xf7 => {
+            if ((token.len < 4) or
+              invalidUnicodeInternal(token.*[1]) or
+              invalidUnicodeInternal(token.*[2]) or
+              invalidUnicodeInternal(token.*[3])) {
+                return false;
+            }
+            token.* = token.*[3..];
+            return true;
+        },
+        else => return false,
+    }
+}
+
+fn invalidUnicodeInternal(char: u8) bool {
+    return char >= 0x80 and char < 0xC0;
 }
